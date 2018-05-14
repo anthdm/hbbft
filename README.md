@@ -24,9 +24,18 @@ Run tests
 make test
 ```
 
+### Current project state
+- [x] Reliable Broadcast Algorithm
+- [ ] Binary Byzantine Agreement
+- [ ] Asynchronous Common Subset 
+- [ ] Practical hbbft engine 
+
 ### References
 - [The Honey Badger BFT protocols](https://eprint.iacr.org/2016/199.pdf)
 - [Practical Byzantine Fault Tolerance](http://pmg.csail.mit.edu/papers/osdi99.pdf)
 - [Treshold encryption](https://en.wikipedia.org/wiki/Threshold_cryptosystem)
 - [Shared secret](https://en.wikipedia.org/wiki/Shared_secret)
 
+### Other language implementations
+- [Rust](https://github.com/poanetwork/hbbft)
+- [Erlang](https://github.com/helium/erlang-hbbft)
