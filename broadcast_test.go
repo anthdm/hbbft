@@ -44,8 +44,7 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 	go func() {
 		for {
 			res := <-resCh
-			_ = res
-			//assert.Equal(t, value, res.value)
+			assert.Equal(t, value, res.value)
 			wg.Done()
 		}
 	}()
