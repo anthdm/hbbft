@@ -20,6 +20,23 @@ type Config struct {
 	Transport Transport
 }
 
+// BroadcastMessage holds the payload sent between nodes in the rbc protocol.
+// Its basically just a wrapper to let top-level protocols distinguish incoming
+// messages.
+type BroadcastMessage struct {
+	Payload interface{}
+}
+
+// BroadcastOutput holds the output after processing an BroadcastMessage.
+type BroadcastOutput struct {
+	// Value is the possible outcome of the rbc protocol.
+	Value []byte
+	// Messages holds a slice of BroadcastMessages that need to be broadcasted after
+	// processing the message. This makes testing the messages transport independent.
+	// And allows returned messages to be propagated to a top level protocol.
+	Messages []*BroadcastMessage
+}
+
 // ProofRequest holds the RootHash along with the Shard of the erasure encoded
 // payload.
 type ProofRequest struct {
@@ -46,8 +63,8 @@ func (p proofs) Len() int           { return len(p) }
 func (p proofs) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 func (p proofs) Less(i, j int) bool { return p[i].Index < p[j].Index }
 
-// ReliableBroadcast represents the instance of the "Reliable Broadcast Algorithm".
-type ReliableBroadcast struct {
+// RBC represents the instance of the "Reliable Broadcast Algorithm".
+type RBC struct {
 	// Config holds the configuration.
 	Config
 
@@ -71,9 +88,9 @@ type ReliableBroadcast struct {
 	echoSent, readySent, outputDecoded bool
 }
 
-// NewReliableBroadcast returns a new instance of the ReliableBroadcast configured
+// NewRBC returns a new instance of the ReliableBroadcast configured
 // with the given config
-func NewReliableBroadcast(cfg Config) *ReliableBroadcast {
+func NewRBC(cfg Config) *RBC {
 	if cfg.F == 0 {
 		cfg.F = (cfg.N - 1) / 3
 	}
@@ -85,7 +102,7 @@ func NewReliableBroadcast(cfg Config) *ReliableBroadcast {
 	if err != nil {
 		panic(err)
 	}
-	return &ReliableBroadcast{
+	return &RBC{
 		Config:          cfg,
 		recvEchos:       make(map[uint64]*EchoRequest),
 		recvReadys:      make(map[uint64][]byte),
@@ -99,7 +116,7 @@ func NewReliableBroadcast(cfg Config) *ReliableBroadcast {
 // into shards and additional parity shards (used for reconstruction), the
 // equally splitted shards will be fed into a reedsolomon encoder. After encoding,
 // equal requests are made to each participant in the network.
-func (r *ReliableBroadcast) Propose(data []byte) error {
+func (r *RBC) Propose(data []byte) error {
 	shards, err := makeShards(r.enc, data)
 	if err != nil {
 		return err
@@ -118,8 +135,8 @@ func (r *ReliableBroadcast) Propose(data []byte) error {
 
 // HandleMessage will process the given rpc message. The caller is resposible to
 // make sure only RPC messages are passed that are elligible for the RBC protocol.
-func (r *ReliableBroadcast) HandleMessage(senderID uint64, msg interface{}) ([]byte, error) {
-	switch t := msg.(type) {
+func (r *RBC) HandleMessage(senderID uint64, msg BroadcastMessage) (*BroadcastOutput, error) {
+	switch t := msg.Payload.(type) {
 	case *ProofRequest:
 		return r.handleProofRequest(senderID, t)
 	case *EchoRequest:
@@ -133,7 +150,7 @@ func (r *ReliableBroadcast) HandleMessage(senderID uint64, msg interface{}) ([]b
 
 // When a node receives a Proof from a proposer it broadcasts the proof as an
 // EchoRequest to the network after validating its content.
-func (r *ReliableBroadcast) handleProofRequest(senderID uint64, req *ProofRequest) ([]byte, error) {
+func (r *RBC) handleProofRequest(senderID uint64, req *ProofRequest) ([]byte, error) {
 	if senderID != r.proposerID {
 		return nil, fmt.Errorf(
 			"receiving proof from (%d) that is not from the proposing node (%d)",
@@ -159,7 +176,7 @@ func (r *ReliableBroadcast) handleProofRequest(senderID uint64, req *ProofReques
 // node receives (f + 1) ReadyRequests we know that at least one good node has
 // sent Ready, hence also knows that everyone will be able to decode eventually
 // and broadcast ready itself.
-func (r *ReliableBroadcast) handleEchoRequest(senderID uint64, req *EchoRequest) ([]byte, error) {
+func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) ([]byte, error) {
 	if _, ok := r.recvEchos[senderID]; ok {
 		return nil, fmt.Errorf("received multiple echos from (%d)", senderID)
 	}
@@ -184,7 +201,7 @@ func (r *ReliableBroadcast) handleEchoRequest(senderID uint64, req *EchoRequest)
 // ready itself. Eventually a node with (2 * f + 1) readys and (f + 1) echos
 // will decode and ouput the value, knowing that every other good node will
 // do the same.
-func (r *ReliableBroadcast) handleReadyRequest(senderID uint64, req *ReadyRequest) ([]byte, error) {
+func (r *RBC) handleReadyRequest(senderID uint64, req *ReadyRequest) ([]byte, error) {
 	if _, ok := r.recvReadys[senderID]; ok {
 		return nil, fmt.Errorf("received multiple readys from (%d)", senderID)
 	}
@@ -199,7 +216,7 @@ func (r *ReliableBroadcast) handleReadyRequest(senderID uint64, req *ReadyReques
 
 // maybeDecodeValue will check whether the Value (V) can be decoded from the received
 // shards. Returns nil if not, value (V) if decoded has succeed.
-func (r *ReliableBroadcast) maybeDecodeValue(hash []byte) []byte {
+func (r *RBC) maybeDecodeValue(hash []byte) []byte {
 	if r.outputDecoded || r.countReadys(hash) <= 2*r.F || r.countEchos(hash) <= r.F {
 		return nil
 	}
@@ -229,7 +246,7 @@ func (r *ReliableBroadcast) maybeDecodeValue(hash []byte) []byte {
 }
 
 // countEchos count the number of echos with the given hash.
-func (r *ReliableBroadcast) countEchos(hash []byte) int {
+func (r *RBC) countEchos(hash []byte) int {
 	n := 0
 	for _, e := range r.recvEchos {
 		if bytes.Compare(hash, e.RootHash) == 0 {
@@ -240,7 +257,7 @@ func (r *ReliableBroadcast) countEchos(hash []byte) int {
 }
 
 // countReadys count the number of readys with the given hash.
-func (r *ReliableBroadcast) countReadys(hash []byte) int {
+func (r *RBC) countReadys(hash []byte) int {
 	n := 0
 	for _, h := range r.recvReadys {
 		if bytes.Compare(hash, h) == 0 {

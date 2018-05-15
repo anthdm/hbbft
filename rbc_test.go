@@ -28,7 +28,7 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 
 	for i, tr := range transports {
 		ee[i] = newTestEngine(resCh,
-			NewReliableBroadcast(
+			NewRBC(
 				Config{
 					ID:        uint64(i),
 					N:         len(transports),
@@ -55,7 +55,7 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 }
 
 func TestNewReliableBroadcast(t *testing.T) {
-	assertState := func(t *testing.T, rb *ReliableBroadcast, cfg Config) {
+	assertState := func(t *testing.T, rb *RBC, cfg Config) {
 		assert.NotNil(t, rb.enc)
 		assert.NotNil(t, rb.recvEchos)
 		assert.NotNil(t, rb.recvReadys)
@@ -64,15 +64,15 @@ func TestNewReliableBroadcast(t *testing.T) {
 	}
 
 	cfg := Config{N: 4, F: 1}
-	rb := NewReliableBroadcast(cfg)
+	rb := NewRBC(cfg)
 	assertState(t, rb, cfg)
 
 	cfg = Config{N: 18, F: 4}
-	rb = NewReliableBroadcast(cfg)
+	rb = NewRBC(cfg)
 	assertState(t, rb, cfg)
 
 	cfg = Config{N: 100, F: 10}
-	rb = NewReliableBroadcast(cfg)
+	rb = NewRBC(cfg)
 	assertState(t, rb, cfg)
 }
 
@@ -118,14 +118,14 @@ type bcResult struct {
 }
 
 type testEngine struct {
-	bc    *ReliableBroadcast
+	rbc   *RBC
 	rpcCh <-chan RPC
 	resCh chan bcResult
 }
 
-func newTestEngine(resCh chan bcResult, bc *ReliableBroadcast, tr Transport) testEngine {
+func newTestEngine(resCh chan bcResult, rbc *RBC, tr Transport) testEngine {
 	return testEngine{
-		bc:    bc,
+		rbc:   rbc,
 		rpcCh: tr.Consume(),
 		resCh: resCh,
 	}
@@ -135,13 +135,13 @@ func (e testEngine) run() {
 	for {
 		select {
 		case rpc := <-e.rpcCh:
-			val, err := e.bc.HandleMessage(rpc.NodeID, rpc.Payload)
+			val, err := e.rbc.HandleMessage(rpc.NodeID, BroadcastMessage{rpc.Payload})
 			if err != nil {
 				log.Println(err)
 			}
 			if val != nil {
 				e.resCh <- bcResult{
-					nodeID: e.bc.ID,
+					nodeID: e.rbc.ID,
 					value:  val,
 				}
 			}
@@ -150,7 +150,7 @@ func (e testEngine) run() {
 }
 
 func (e testEngine) propose(data []byte) {
-	e.bc.Propose(data)
+	e.rbc.Propose(data)
 }
 
 func connectTransports(tt []Transport) {
