@@ -108,11 +108,15 @@ func (r *ReliableBroadcast) Propose(data []byte) error {
 	if err != nil {
 		return err
 	}
-	go r.Transport.SendProofRequests(r.ID, reqs)
+
+	// The first request is for ourselfs. The rests is distributed under the
+	// participants.
+	r.handleProofRequest(r.ID, reqs[0])
+	go r.Transport.SendProofRequests(r.ID, reqs[1:])
 	return nil
 }
 
-// HandleMessage will process the given rpc message The caller is resposible to
+// HandleMessage will process the given rpc message. The caller is resposible to
 // make sure only RPC messages are passed that are elligible for the RBC protocol.
 func (r *ReliableBroadcast) HandleMessage(senderID uint64, msg interface{}) ([]byte, error) {
 	switch t := msg.(type) {
@@ -211,8 +215,8 @@ func (r *ReliableBroadcast) maybeDecodeValue(hash []byte) []byte {
 
 	// Reconstruct the value with reedsolomon encoding.
 	shards := make([][]byte, r.numParityShards+r.numDataShards)
-	for i, p := range prfs {
-		shards[i] = p.Proof[0]
+	for _, p := range prfs {
+		shards[p.Index] = p.Proof[0]
 	}
 	if err := r.enc.Reconstruct(shards); err != nil {
 		return nil
