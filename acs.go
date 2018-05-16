@@ -66,9 +66,3 @@ func (a *ACS) HandleMessage(senderID uint64, msg interface{}) {
 // The caller is responsible for constructing the value (V) out of its unbounded
 // transaction buffer. If using this with the top level hbbft engine, the engine
 // will take care of this part.
-func (a *ACS) Propose(value []byte) error {
-	for _, rbc := range a.rbcInstances {
-		rbc.Propose(value)
-	}
-	return nil
-}

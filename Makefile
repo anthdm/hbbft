@@ -2,4 +2,4 @@ deps:
 	@dep ensure
 
 test: 
-	@go test ./... --cover
+	@go test ./... -v --cover

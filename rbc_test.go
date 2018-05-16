@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// This tests one full round of RBC where all the nodes are behaving correctly.
 func TestOneNormalBroadcastRound(t *testing.T) {
 	transports := []Transport{
 		NewLocalTransport("a"),
@@ -21,13 +20,13 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 	connectTransports(transports)
 
 	var (
-		ee    = make([]testEngine, len(transports))
+		ee    = make([]testRBCEngine, len(transports))
 		resCh = make(chan bcResult)
 		value = []byte("foo bar foobar")
 	)
 
 	for i, tr := range transports {
-		ee[i] = newTestEngine(resCh,
+		ee[i] = newTestRBCEngine(resCh,
 			NewRBC(
 				Config{
 					ID:        uint64(i),
@@ -50,8 +49,20 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 	}()
 
 	// Let the first node propose a value to the others.
-	ee[0].propose(value)
+	err := ee[0].propose(value)
+	assert.Nil(t, err)
 	wg.Wait()
+}
+
+func TestRBCInputValue(t *testing.T) {
+	rbc := NewRBC(Config{
+		N: 4,
+	})
+	reqs, err := rbc.InputValue([]byte("this is a test string"))
+	assert.Nil(t, err)
+	assert.Equal(t, rbc.N-1, len(reqs))
+	assert.Equal(t, 1, len(rbc.Messages()))
+	assert.Equal(t, 0, len(rbc.messages))
 }
 
 func TestNewReliableBroadcast(t *testing.T) {
@@ -61,6 +72,7 @@ func TestNewReliableBroadcast(t *testing.T) {
 		assert.NotNil(t, rb.recvReadys)
 		assert.Equal(t, rb.numParityShards, cfg.F*2)
 		assert.Equal(t, rb.numDataShards, cfg.N-rb.numParityShards)
+		assert.Equal(t, 0, len(rb.messages))
 	}
 
 	cfg := Config{N: 4, F: 1}
@@ -117,27 +129,33 @@ type bcResult struct {
 	value  []byte
 }
 
-type testEngine struct {
-	rbc   *RBC
-	rpcCh <-chan RPC
-	resCh chan bcResult
+// simple engine to test RBC independently.
+type testRBCEngine struct {
+	rbc       *RBC
+	rpcCh     <-chan RPC
+	resCh     chan bcResult
+	transport Transport
 }
 
-func newTestEngine(resCh chan bcResult, rbc *RBC, tr Transport) testEngine {
-	return testEngine{
-		rbc:   rbc,
-		rpcCh: tr.Consume(),
-		resCh: resCh,
+func newTestRBCEngine(resCh chan bcResult, rbc *RBC, tr Transport) testRBCEngine {
+	return testRBCEngine{
+		rbc:       rbc,
+		rpcCh:     tr.Consume(),
+		resCh:     resCh,
+		transport: tr,
 	}
 }
 
-func (e testEngine) run() {
+func (e testRBCEngine) run() {
 	for {
 		select {
 		case rpc := <-e.rpcCh:
-			val, err := e.rbc.HandleMessage(rpc.NodeID, BroadcastMessage{rpc.Payload})
+			val, err := e.rbc.HandleMessage(rpc.NodeID, rpc.Payload.(*BroadcastMessage))
 			if err != nil {
 				log.Println(err)
+			}
+			for _, msg := range e.rbc.Messages() {
+				go e.transport.Broadcast(e.rbc.ID, msg)
 			}
 			if val != nil {
 				e.resCh <- bcResult{
@@ -149,8 +167,13 @@ func (e testEngine) run() {
 	}
 }
 
-func (e testEngine) propose(data []byte) {
-	e.rbc.Propose(data)
+func (e testRBCEngine) propose(data []byte) error {
+	reqs, err := e.rbc.InputValue(data)
+	if err != nil {
+		return err
+	}
+	go e.transport.SendProofMessages(e.rbc.ID, reqs)
+	return nil
 }
 
 func connectTransports(tt []Transport) {

@@ -14,9 +14,9 @@ type Transport interface {
 	// requests.
 	Consume() <-chan RPC
 
-	// SendProofRequests will divide the given ProofRequests and send one to
+	// SendProofMessages will divide the given BroadcastMessages and send one to
 	// each participant in the network.
-	SendProofRequests(uint64, []*ProofRequest) error
+	SendProofMessages(uint64, []*BroadcastMessage) error
 
 	// Broadcast multicasts the given interface to each node in thenetwork.
 	Broadcast(uint64, interface{}) error

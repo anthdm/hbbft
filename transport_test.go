@@ -8,14 +8,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestSendProofRequests(t *testing.T) {
+func TestSendProofMessages(t *testing.T) {
 	var (
-		reqs       = make([]*ProofRequest, 3)
+		reqs       = make([]*BroadcastMessage, 3)
 		transports = make([]Transport, 3)
 		chans      = make([]<-chan RPC, 3)
 	)
 	for i := 0; i < len(reqs); i++ {
-		reqs[i] = &ProofRequest{Index: i}
+		reqs[i] = &BroadcastMessage{&ProofRequest{Index: i}}
 		transports[i] = NewLocalTransport(fmt.Sprintf("%d", i))
 		chans[i] = transports[i].Consume()
 	}
@@ -32,14 +32,19 @@ func TestSendProofRequests(t *testing.T) {
 			select {
 			case rpc := <-chans[i]:
 				assert.Equal(t, uint64(1337), rpc.NodeID)
-				assert.IsType(t, &ProofRequest{}, rpc.Payload)
+				assert.IsType(t, &BroadcastMessage{}, rpc.Payload)
+				assert.IsType(
+					t,
+					&ProofRequest{},
+					rpc.Payload.(*BroadcastMessage).Payload,
+				)
 				wg.Done()
 			}
 		}(i)
 	}
 
 	// Let the sending transport send out the request.
-	sendingTrans.SendProofRequests(1337, reqs)
+	sendingTrans.SendProofMessages(1337, reqs)
 	wg.Wait()
 }
 

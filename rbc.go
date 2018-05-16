@@ -27,16 +27,6 @@ type BroadcastMessage struct {
 	Payload interface{}
 }
 
-// BroadcastOutput holds the output after processing an BroadcastMessage.
-type BroadcastOutput struct {
-	// Value is the possible outcome of the rbc protocol.
-	Value []byte
-	// Messages holds a slice of BroadcastMessages that need to be broadcasted after
-	// processing the message. This makes testing the messages transport independent.
-	// And allows returned messages to be propagated to a top level protocol.
-	Messages []*BroadcastMessage
-}
-
 // ProofRequest holds the RootHash along with the Shard of the erasure encoded
 // payload.
 type ProofRequest struct {
@@ -86,6 +76,8 @@ type RBC struct {
 	numParityShards, numDataShards int
 
 	echoSent, readySent, outputDecoded bool
+
+	messages []*BroadcastMessage
 }
 
 // NewRBC returns a new instance of the ReliableBroadcast configured
@@ -109,33 +101,36 @@ func NewRBC(cfg Config) *RBC {
 		enc:             enc,
 		numParityShards: parityShards,
 		numDataShards:   dataShards,
+		messages:        []*BroadcastMessage{},
 	}
 }
 
-// Propose will propose the given data as value V. The data will first splitted
+// InputValue will set the given data as value V. The data will first splitted
 // into shards and additional parity shards (used for reconstruction), the
 // equally splitted shards will be fed into a reedsolomon encoder. After encoding,
-// equal requests are made to each participant in the network.
-func (r *RBC) Propose(data []byte) error {
+// only the requests for the other participants are beeing returned.
+func (r *RBC) InputValue(data []byte) ([]*BroadcastMessage, error) {
 	shards, err := makeShards(r.enc, data)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	reqs, err := makeProofRequests(shards)
+	reqs, err := makeBroadcastMessages(shards)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
 	// The first request is for ourselfs. The rests is distributed under the
 	// participants.
-	r.handleProofRequest(r.ID, reqs[0])
-	go r.Transport.SendProofRequests(r.ID, reqs[1:])
-	return nil
+	proof := reqs[0].Payload.(*ProofRequest)
+	if _, err := r.handleProofRequest(r.ID, proof); err != nil {
+		return nil, err
+	}
+	return reqs[1:], nil
 }
 
-// HandleMessage will process the given rpc message. The caller is resposible to
-// make sure only RPC messages are passed that are elligible for the RBC protocol.
-func (r *RBC) HandleMessage(senderID uint64, msg BroadcastMessage) (*BroadcastOutput, error) {
+// HandleMessage will process the given rpc message and will return a possible
+// outcome. The caller is resposible to make sure only RPC messages are passed
+// that are elligible for the RBC protocol.
+func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) ([]byte, error) {
 	switch t := msg.Payload.(type) {
 	case *ProofRequest:
 		return r.handleProofRequest(senderID, t)
@@ -144,8 +139,17 @@ func (r *RBC) HandleMessage(senderID uint64, msg BroadcastMessage) (*BroadcastOu
 	case *ReadyRequest:
 		return r.handleReadyRequest(senderID, t)
 	default:
-		return nil, fmt.Errorf("invalid RBC protocol message: %v", msg)
+		return nil, fmt.Errorf("invalid RBC protocol message: %+v", msg)
 	}
+}
+
+// Messages returns the que of messages. The message que get's filled after
+// processing a protocol message. After calling this method the que will
+// be empty. Hence calling Messages can only occur once in a single roundtrip.
+func (r *RBC) Messages() []*BroadcastMessage {
+	msgs := r.messages
+	r.messages = []*BroadcastMessage{}
+	return msgs
 }
 
 // When a node receives a Proof from a proposer it broadcasts the proof as an
@@ -165,7 +169,7 @@ func (r *RBC) handleProofRequest(senderID uint64, req *ProofRequest) ([]byte, er
 	}
 	r.echoSent = true
 	echo := &EchoRequest{*req}
-	go r.Transport.Broadcast(r.ID, echo)
+	r.messages = append(r.messages, &BroadcastMessage{echo})
 	return r.handleEchoRequest(r.ID, echo)
 }
 
@@ -191,7 +195,7 @@ func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) ([]byte, erro
 
 	r.readySent = true
 	ready := &ReadyRequest{req.RootHash}
-	go r.Transport.Broadcast(r.ID, ready)
+	r.messages = append(r.messages, &BroadcastMessage{ready})
 	return r.handleReadyRequest(r.ID, ready)
 }
 
@@ -209,7 +213,8 @@ func (r *RBC) handleReadyRequest(senderID uint64, req *ReadyRequest) ([]byte, er
 
 	if r.countReadys(req.RootHash) == r.F+1 && !r.readySent {
 		r.readySent = true
-		go r.Transport.Broadcast(r.ID, &ReadyRequest{req.RootHash})
+		ready := &ReadyRequest{req.RootHash}
+		r.messages = append(r.messages, &BroadcastMessage{ready})
 	}
 	return r.maybeDecodeValue(req.RootHash), nil
 }
@@ -286,6 +291,29 @@ func makeProofRequests(shards [][]byte) ([]*ProofRequest, error) {
 		}
 	}
 	return reqs, nil
+}
+
+// makeProofRequests will build a merkletree out of the given shards and make
+// equal ProofRequest to send one proof to each participant in the consensus.
+func makeBroadcastMessages(shards [][]byte) ([]*BroadcastMessage, error) {
+	msgs := make([]*BroadcastMessage, len(shards))
+	for i := 0; i < len(msgs); i++ {
+		tree := merkletree.New(sha256.New())
+		tree.SetIndex(uint64(i))
+		for i := 0; i < len(shards); i++ {
+			tree.Push(shards[i])
+		}
+		root, proof, proofIndex, n := tree.Prove()
+		msgs[i] = &BroadcastMessage{
+			Payload: &ProofRequest{
+				RootHash: root,
+				Proof:    proof,
+				Index:    int(proofIndex),
+				Leaves:   int(n),
+			},
+		}
+	}
+	return msgs, nil
 }
 
 // validateProof will validate the given ProofRequest and hence return true or

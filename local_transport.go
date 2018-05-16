@@ -28,8 +28,8 @@ func (t *LocalTransport) Consume() <-chan RPC {
 	return t.consumeCh
 }
 
-// SendProofRequests implements the Transport interface.
-func (t *LocalTransport) SendProofRequests(id uint64, reqs []*ProofRequest) error {
+// SendProofMessages implements the Transport interface.
+func (t *LocalTransport) SendProofMessages(id uint64, reqs []*BroadcastMessage) error {
 	i := 0
 	for addr := range t.peers {
 		if err := t.makeRPC(id, addr, reqs[i]); err != nil {
