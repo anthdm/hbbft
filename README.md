@@ -26,7 +26,7 @@ make test
 
 ### Current project state
 - [x] Reliable Broadcast Algorithm
-- [ ] Binary Byzantine Agreement
+- [x] Binary Byzantine Agreement
 - [ ] Asynchronous Common Subset 
 - [ ] Practical hbbft engine 
 

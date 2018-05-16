@@ -14,12 +14,12 @@ type Transport interface {
 	// requests.
 	Consume() <-chan RPC
 
-	// SendProofMessages will divide the given BroadcastMessages and send one to
-	// each participant in the network.
-	SendProofMessages(uint64, []*BroadcastMessage) error
+	// SendProofMessages will equally spread the given messages under the
+	// participating nodes.
+	SendProofMessages(from uint64, msgs []interface{}) error
 
-	// Broadcast multicasts the given interface to each node in thenetwork.
-	Broadcast(uint64, interface{}) error
+	// Broadcast multicasts the given messages to all connected nodes.
+	Broadcast(from uint64, msg interface{}) error
 
 	// Connect is used to connect this tranport to another transport.
 	Connect(string, Transport)

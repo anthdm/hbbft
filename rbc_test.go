@@ -11,18 +11,14 @@ import (
 )
 
 func TestOneNormalBroadcastRound(t *testing.T) {
-	transports := []Transport{
-		NewLocalTransport("a"),
-		NewLocalTransport("b"),
-		NewLocalTransport("c"),
-		NewLocalTransport("d"),
-	}
+	transports := makeTransports(4)
 	connectTransports(transports)
 
 	var (
-		ee    = make([]testRBCEngine, len(transports))
-		resCh = make(chan bcResult)
-		value = []byte("foo bar foobar")
+		ee         = make([]testRBCEngine, len(transports))
+		resCh      = make(chan bcResult)
+		value      = []byte("foo bar foobar")
+		proposerID uint64
 	)
 
 	for i, tr := range transports {
@@ -32,7 +28,7 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 					ID:        uint64(i),
 					N:         len(transports),
 					Transport: tr,
-				},
+				}, proposerID,
 			), tr)
 		go ee[i].run()
 	}
@@ -49,7 +45,7 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 	}()
 
 	// Let the first node propose a value to the others.
-	err := ee[0].propose(value)
+	err := ee[proposerID].propose(value)
 	assert.Nil(t, err)
 	wg.Wait()
 }
@@ -57,7 +53,7 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 func TestRBCInputValue(t *testing.T) {
 	rbc := NewRBC(Config{
 		N: 4,
-	})
+	}, 0)
 	reqs, err := rbc.InputValue([]byte("this is a test string"))
 	assert.Nil(t, err)
 	assert.Equal(t, rbc.N-1, len(reqs))
@@ -76,15 +72,15 @@ func TestNewReliableBroadcast(t *testing.T) {
 	}
 
 	cfg := Config{N: 4, F: 1}
-	rb := NewRBC(cfg)
+	rb := NewRBC(cfg, 0)
 	assertState(t, rb, cfg)
 
 	cfg = Config{N: 18, F: 4}
-	rb = NewRBC(cfg)
+	rb = NewRBC(cfg, 0)
 	assertState(t, rb, cfg)
 
 	cfg = Config{N: 100, F: 10}
-	rb = NewRBC(cfg)
+	rb = NewRBC(cfg, 0)
 	assertState(t, rb, cfg)
 }
 
@@ -172,7 +168,11 @@ func (e testRBCEngine) propose(data []byte) error {
 	if err != nil {
 		return err
 	}
-	go e.transport.SendProofMessages(e.rbc.ID, reqs)
+	msgs := make([]interface{}, len(reqs))
+	for i := 0; i < len(reqs); i++ {
+		msgs[i] = reqs[i]
+	}
+	go e.transport.SendProofMessages(e.rbc.ID, msgs)
 	return nil
 }
 

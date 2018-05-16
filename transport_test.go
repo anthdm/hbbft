@@ -44,7 +44,11 @@ func TestSendProofMessages(t *testing.T) {
 	}
 
 	// Let the sending transport send out the request.
-	sendingTrans.SendProofMessages(1337, reqs)
+	messages := make([]interface{}, len(reqs))
+	for i, msg := range reqs {
+		messages[i] = msg
+	}
+	sendingTrans.SendProofMessages(1337, messages)
 	wg.Wait()
 }
 

@@ -82,7 +82,7 @@ type RBC struct {
 
 // NewRBC returns a new instance of the ReliableBroadcast configured
 // with the given config
-func NewRBC(cfg Config) *RBC {
+func NewRBC(cfg Config, proposerID uint64) *RBC {
 	if cfg.F == 0 {
 		cfg.F = (cfg.N - 1) / 3
 	}
@@ -102,6 +102,7 @@ func NewRBC(cfg Config) *RBC {
 		numParityShards: parityShards,
 		numDataShards:   dataShards,
 		messages:        []*BroadcastMessage{},
+		proposerID:      proposerID,
 	}
 }
 
@@ -182,10 +183,12 @@ func (r *RBC) handleProofRequest(senderID uint64, req *ProofRequest) ([]byte, er
 // and broadcast ready itself.
 func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) ([]byte, error) {
 	if _, ok := r.recvEchos[senderID]; ok {
-		return nil, fmt.Errorf("received multiple echos from (%d)", senderID)
+		return nil, fmt.Errorf(
+			"received multiple echos from (%d) my id (%d)", senderID, r.ID)
 	}
 	if !validateProof(&req.ProofRequest) {
-		return nil, fmt.Errorf("received invalid proof from (%d)", senderID)
+		return nil, fmt.Errorf(
+			"received invalid proof from (%d) my id (%d)", senderID, r.ID)
 	}
 
 	r.recvEchos[senderID] = req

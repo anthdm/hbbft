@@ -29,10 +29,10 @@ func (t *LocalTransport) Consume() <-chan RPC {
 }
 
 // SendProofMessages implements the Transport interface.
-func (t *LocalTransport) SendProofMessages(id uint64, reqs []*BroadcastMessage) error {
+func (t *LocalTransport) SendProofMessages(id uint64, msgs []interface{}) error {
 	i := 0
 	for addr := range t.peers {
-		if err := t.makeRPC(id, addr, reqs[i]); err != nil {
+		if err := t.makeRPC(id, addr, msgs[i]); err != nil {
 			return err
 		}
 		i++
@@ -41,9 +41,9 @@ func (t *LocalTransport) SendProofMessages(id uint64, reqs []*BroadcastMessage) 
 }
 
 // Broadcast implements the Transport interface.
-func (t *LocalTransport) Broadcast(id uint64, v interface{}) error {
+func (t *LocalTransport) Broadcast(id uint64, msg interface{}) error {
 	for addr := range t.peers {
-		if err := t.makeRPC(id, addr, v); err != nil {
+		if err := t.makeRPC(id, addr, msg); err != nil {
 			return err
 		}
 	}
@@ -63,7 +63,7 @@ func (t *LocalTransport) Addr() string {
 	return t.addr
 }
 
-func (t *LocalTransport) makeRPC(id uint64, addr string, payload interface{}) error {
+func (t *LocalTransport) makeRPC(id uint64, addr string, msg interface{}) error {
 	t.lock.RLock()
 	peer, ok := t.peers[addr]
 	t.lock.RUnlock()
@@ -73,7 +73,7 @@ func (t *LocalTransport) makeRPC(id uint64, addr string, payload interface{}) er
 	}
 	peer.consumeCh <- RPC{
 		NodeID:  id,
-		Payload: payload,
+		Payload: msg,
 	}
 	return nil
 }

@@ -21,24 +21,18 @@ func TestNewBBA(t *testing.T) {
 func TestAdvanceEpochInBBA(t *testing.T) {
 	cfg := Config{N: 4}
 	bba := NewBBA(cfg)
-	bba.binValues = []bool{false, true, true}
 	bba.epoch = 8
+	bba.binValues = []bool{false, true, true}
+	bba.sentBvals = []bool{false, true}
 	bba.recvAux = map[uint64]bool{
 		1:    false,
 		3949: true,
 	}
 	bba.advanceEpoch()
 	assert.Equal(t, 0, len(bba.recvAux))
+	assert.Equal(t, 0, len(bba.sentBvals))
 	assert.Equal(t, 0, len(bba.binValues))
 	assert.Equal(t, uint32(8+1), bba.epoch)
-}
-
-func TestHandleMessageFromOtherEpoch(t *testing.T) {
-	cfg := Config{N: 4}
-	bba := NewBBA(cfg)
-	_, err := bba.HandleMessage(4, AgreementMessage{Epoch: 3})
-	assert.NotNil(t, err)
-	assert.Contains(t, err.Error(), "msg from other epoch")
 }
 
 func TestHandleBvalRequest(t *testing.T) {
@@ -61,5 +55,4 @@ func TestHandleBvalRequest(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, 1, len(out.Messages))
 	assert.IsType(t, &AuxRequest{}, out.Messages[0].Message)
-
 }

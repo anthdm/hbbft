@@ -3,6 +3,8 @@ package hbbft
 import (
 	"errors"
 	"fmt"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // AgreementMessage holds the epoch and the message sent in the BBA protocol.
@@ -73,8 +75,12 @@ type BBA struct {
 	// recvAux is a mapping of the sender and the receveived Aux value.
 	recvAux map[uint64]bool
 
-	estimated, done bool
-	output          interface{}
+	// Whether this bba is terminated or not.
+	done bool
+
+	// output and estimated of the bba protocol. This can be either nil or a
+	// boolean.
+	output, estimated interface{}
 }
 
 // NewBBA returns a new instance of the Binary Byzantine Agreement.
@@ -91,19 +97,18 @@ func NewBBA(cfg Config) *BBA {
 	}
 }
 
-// Propose will set the given val as the initial value to be proposed in the
-// Agreement.
-func (b *BBA) Propose(val bool) error {
+// InputValue will set the given val as the initial value to be proposed in the
+// Agreement and returns an initial AgreementMessage or an error.
+func (b *BBA) InputValue(val bool) (*AgreementMessage, error) {
 	// Make sure we are in the first epoch round.
 	if b.epoch != 0 {
-		return errors.New("proposing initial value can only be done in the first epoch")
+		return nil, errors.New("proposing initial value can only be done in the first epoch")
 	}
 	b.estimated = val
-	// Handle the value internally.
+	// Set the value internally.
 	b.recvBval[b.ID] = val
 	msg := NewAgreementMessage(int(b.epoch), &BvalRequest{val})
-	go b.Transport.Broadcast(b.ID, msg)
-	return nil
+	return msg, nil
 }
 
 // HandleMessage will process the given rpc message. The caller is resposible to
@@ -111,7 +116,8 @@ func (b *BBA) Propose(val bool) error {
 func (b *BBA) HandleMessage(senderID uint64, msg AgreementMessage) (*AgreementOutput, error) {
 	// Make sure we only handle messages that are sent in the same epoch.
 	if msg.Epoch != int(b.epoch) {
-		return nil, fmt.Errorf("received msg from other epoch: %d", msg.Epoch)
+		log.Warnf("received msg from other epoch %d my epoch %d", msg.Epoch, b.epoch)
+		return nil, nil
 	}
 	if b.done {
 		return nil, errors.New("bba already terminated")
@@ -149,11 +155,18 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) (*AgreementOutput, er
 	// When receiving input(b) messages from f + 1 nodes, if inputs(b) is not
 	// been sent yet broadcast input(b) and handle the input ourselfs.
 	if lenIn == b.F+1 && !b.hasSentBval(val) {
+		b.sentBvals = append(b.sentBvals, val)
 		msg := NewAgreementMessage(int(b.epoch), &BvalRequest{val})
 		output.AddMessage(msg)
 		b.recvBval[b.ID] = val
 	}
 	return nil, nil
+}
+
+// AcceptInput returns true whether this bba instance is elligable for accepting
+// a new input value.
+func (b *BBA) AcceptInput() bool {
+	return b.epoch == 0 && b.estimated != nil
 }
 
 func (b *BBA) handleAuxRequest(senderID uint64, val bool) (*AgreementOutput, error) {
@@ -201,7 +214,9 @@ func (b *BBA) maybeOutputAgreement() (interface{}, *AgreementMessage) {
 			decision = b.output
 		}
 	}
-	msg := NewAgreementMessage(int(b.epoch), &BvalRequest{b.estimated})
+	estimated := b.estimated.(bool)
+	b.sentBvals = append(b.sentBvals, estimated)
+	msg := NewAgreementMessage(int(b.epoch), &BvalRequest{estimated})
 	return decision, msg
 }
 
@@ -209,6 +224,7 @@ func (b *BBA) maybeOutputAgreement() (interface{}, *AgreementMessage) {
 // the epoch value by 1.
 func (b *BBA) advanceEpoch() {
 	b.binValues = []bool{}
+	b.sentBvals = []bool{}
 	b.recvAux = make(map[uint64]bool)
 	b.epoch++
 }
