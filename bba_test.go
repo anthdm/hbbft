@@ -1,10 +1,52 @@
 package hbbft
 
 import (
+	"log"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestNormalBBARound(t *testing.T) {
+	transports := makeTransports(4)
+	connectTransports(transports)
+
+	var (
+		ee    = make([]testBBAEngine, len(transports))
+		resCh = make(chan bbaResult)
+	)
+
+	for i, tr := range transports {
+		ee[i] = newTestBBAEngine(resCh,
+			NewBBA(
+				Config{
+					ID:        uint64(i),
+					N:         len(transports),
+					Transport: tr,
+				},
+			), tr)
+		go ee[i].run()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	// Start a routine that will collect the results from all the nodes.
+	go func() {
+		for {
+			res := <-resCh
+			assert.Equal(t, true, res.value)
+			wg.Done()
+		}
+	}()
+
+	// Let the first node propose a value to the others.
+	for _, bba := range ee {
+		err := bba.propose(true)
+		assert.Nil(t, err)
+	}
+	wg.Wait()
+}
 
 func TestNewBBA(t *testing.T) {
 	cfg := Config{N: 4}
@@ -35,24 +77,56 @@ func TestAdvanceEpochInBBA(t *testing.T) {
 	assert.Equal(t, uint32(8+1), bba.epoch)
 }
 
-func TestHandleBvalRequest(t *testing.T) {
-	cfg := Config{N: 4}
-	bba := NewBBA(cfg)
+type bbaResult struct {
+	nodeID uint64
+	value  bool
+}
 
-	// Expected output is nil, we only expect an output:
-	// inputs(b) 2 * (F + 1)
-	out, err := bba.handleBvalRequest(1, true)
-	assert.Nil(t, err)
-	assert.Nil(t, out)
+type testBBAEngine struct {
+	bba       *BBA
+	rpcCh     <-chan RPC
+	resCh     chan bbaResult
+	transport Transport
+}
 
-	// Expected output should have
-	bba.recvBval = map[uint64]bool{
-		1: true,
-		2: true,
-		3: true,
+func newTestBBAEngine(resCh chan bbaResult, bba *BBA, tr Transport) testBBAEngine {
+	return testBBAEngine{
+		bba:       bba,
+		rpcCh:     tr.Consume(),
+		resCh:     resCh,
+		transport: tr,
 	}
-	out, err = bba.handleBvalRequest(0, true)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(out.Messages))
-	assert.IsType(t, &AuxRequest{}, out.Messages[0].Message)
+}
+
+func (e testBBAEngine) run() {
+	for {
+		select {
+		case rpc := <-e.rpcCh:
+			val, err := e.bba.HandleMessage(rpc.NodeID, *rpc.Payload.(*AgreementMessage))
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+			if val == nil {
+				continue
+			}
+			for _, msg := range val.Messages {
+				if msg != nil {
+					go e.transport.Broadcast(e.bba.ID, msg)
+				}
+			}
+			if val.Decision != nil {
+				e.resCh <- bbaResult{e.bba.ID, val.Decision.(bool)}
+			}
+		}
+	}
+}
+
+func (e testBBAEngine) propose(value bool) error {
+	res, err := e.bba.InputValue(value)
+	if err != nil {
+		return err
+	}
+	go e.transport.Broadcast(e.bba.ID, res)
+	return nil
 }
