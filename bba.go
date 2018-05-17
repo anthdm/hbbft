@@ -9,33 +9,10 @@ import (
 
 // AgreementMessage holds the epoch and the message sent in the BBA protocol.
 type AgreementMessage struct {
-	Epoch   int
+	// Epoch when this message was sent.
+	Epoch int
+	// The actual contents of the message.
 	Message interface{}
-}
-
-// AgreementOutput holds the output after processing a BBA message.
-type AgreementOutput struct {
-	// Decision is the value which the agreement has decided. This can be either
-	// a bool or nil.
-	Decision interface{}
-	// Messages holds a slice of agreement Messages that need to be broadcasted after
-	// processing the message. This makes testing the messages transport independent.
-	// And allows returned messages to be propagated to a top level protocol.
-	Messages []*AgreementMessage
-}
-
-// AddMessage only adds the given msg if its not nil.
-func (o *AgreementOutput) AddMessage(msg *AgreementMessage) {
-	if msg != nil {
-		o.Messages = append(o.Messages, msg)
-	}
-}
-
-// NewAgreementOutput constructs a new AgreementOutput.
-func NewAgreementOutput() *AgreementOutput {
-	return &AgreementOutput{
-		Messages: []*AgreementMessage{},
-	}
 }
 
 // NewAgreementMessage constructs a new AgreementMessage.
@@ -60,6 +37,8 @@ type AuxRequest struct {
 type BBA struct {
 	// Config holds the BBA configuration.
 	Config
+	// Unique id of the proposing instance.
+	pid uint64
 	// Current epoch.
 	epoch uint32
 	//  Bval requests we accepted this epoch.
@@ -74,25 +53,31 @@ type BBA struct {
 	done bool
 	// output and estimated of the bba protocol. This can be either nil or a
 	// boolean.
-	output, estimated interface{}
+	output, estimated, decision interface{}
+	// Que of AgreementMessages that need to be broadcasted after each received
+	// and processed a message.
+	messages []*AgreementMessage
+
 	// control flow tuples for internal channel communication.
-	inputCh   chan inputTuple
-	messageCh chan messageTuple
+	inputCh   chan bbaInputTuple
+	messageCh chan bbaMessageTuple
 }
 
 // NewBBA returns a new instance of the Binary Byzantine Agreement.
-func NewBBA(cfg Config) *BBA {
+func NewBBA(cfg Config, pid uint64) *BBA {
 	if cfg.F == 0 {
 		cfg.F = (cfg.N - 1) / 3
 	}
 	bba := &BBA{
 		Config:    cfg,
+		pid:       pid,
 		recvBval:  make(map[uint64]bool),
 		recvAux:   make(map[uint64]bool),
 		sentBvals: []bool{},
 		binValues: []bool{},
-		inputCh:   make(chan inputTuple),
-		messageCh: make(chan messageTuple),
+		inputCh:   make(chan bbaInputTuple),
+		messageCh: make(chan bbaMessageTuple),
+		messages:  []*AgreementMessage{},
 	}
 	go bba.run()
 	return bba
@@ -101,34 +86,29 @@ func NewBBA(cfg Config) *BBA {
 // Control flow structure for internal channel communication. Allowing us to
 // avoid the use of mutexes and eliminates race conditions.
 type (
-	messageTuple struct {
+	bbaMessageTuple struct {
 		senderID uint64
-		msg      AgreementMessage
-		response chan messageResponse
+		msg      *AgreementMessage
+		err      chan error
 	}
 
-	messageResponse struct {
-		output *AgreementOutput
-		err    error
-	}
-
-	inputResponse struct {
+	bbaInputResponse struct {
 		msg *AgreementMessage
 		err error
 	}
 
-	inputTuple struct {
+	bbaInputTuple struct {
 		value    bool
-		response chan inputResponse
+		response chan bbaInputResponse
 	}
 )
 
 // InputValue will set the given val as the initial value to be proposed in the
 // Agreement and returns an initial AgreementMessage or an error.
 func (b *BBA) InputValue(val bool) (*AgreementMessage, error) {
-	t := inputTuple{
+	t := bbaInputTuple{
 		value:    val,
-		response: make(chan inputResponse),
+		response: make(chan bbaInputResponse),
 	}
 	b.inputCh <- t
 	resp := <-t.response
@@ -137,21 +117,45 @@ func (b *BBA) InputValue(val bool) (*AgreementMessage, error) {
 
 // HandleMessage will process the given rpc message. The caller is resposible to
 // make sure only RPC messages are passed that are elligible for the BBA protocol.
-func (b *BBA) HandleMessage(senderID uint64, msg AgreementMessage) (*AgreementOutput, error) {
-	t := messageTuple{
+func (b *BBA) HandleMessage(senderID uint64, msg *AgreementMessage) error {
+	t := bbaMessageTuple{
 		senderID: senderID,
 		msg:      msg,
-		response: make(chan messageResponse),
+		err:      make(chan error),
 	}
 	b.messageCh <- t
-	resp := <-t.response
-	return resp.output, resp.err
+	return <-t.err
 }
 
 // AcceptInput returns true whether this bba instance is elligable for accepting
 // a new input value.
 func (b *BBA) AcceptInput() bool {
-	return b.epoch == 0 && b.estimated != nil
+	return b.epoch == 0 && b.estimated == nil
+}
+
+// Output will return the output of the bba instance. If the output was not nil
+// then it will return the output else nil. Note that after consuming the output
+// its will be set to nil forever.
+func (b *BBA) Output() interface{} {
+	if b.output != nil {
+		out := b.output
+		b.output = nil
+		return out
+	}
+	return nil
+}
+
+// Messages returns the que of messages. The message que get's filled after
+// processing a protocol message. After calling this method the que will
+// be empty. Hence calling Messages can only occur once in a single roundtrip.
+func (b *BBA) Messages() []*AgreementMessage {
+	msgs := b.messages
+	b.messages = []*AgreementMessage{}
+	return msgs
+}
+
+func (b *BBA) addMessage(msg *AgreementMessage) {
+	b.messages = append(b.messages, msg)
 }
 
 // run makes sure we only process 1 message at the same time, avoiding mutexes
@@ -159,12 +163,11 @@ func (b *BBA) AcceptInput() bool {
 func (b *BBA) run() {
 	for {
 		select {
-		case input := <-b.inputCh:
-			msg, err := b.inputValue(input.value)
-			input.response <- inputResponse{msg, err}
+		case t := <-b.inputCh:
+			msg, err := b.inputValue(t.value)
+			t.response <- bbaInputResponse{msg, err}
 		case t := <-b.messageCh:
-			out, err := b.handleMessage(t.senderID, t.msg)
-			t.response <- messageResponse{out, err}
+			t.err <- b.handleMessage(t.senderID, t.msg)
 		}
 	}
 }
@@ -173,27 +176,30 @@ func (b *BBA) run() {
 // Agreement and returns an initial AgreementMessage or an error.
 func (b *BBA) inputValue(val bool) (*AgreementMessage, error) {
 	// Make sure we are in the first epoch round.
-	if b.epoch != 0 {
+	if b.epoch != 0 || b.estimated != nil {
 		return nil, errors.New(
 			"proposing initial value can only be done in the first epoch")
 	}
 	b.estimated = val
-	// Set the value as sent internally.
-	b.recvBval[b.ID] = val
+	b.sentBvals = append(b.sentBvals, val)
+	b.recvBval[b.pid] = val
 	msg := NewAgreementMessage(int(b.epoch), &BvalRequest{val})
 	return msg, nil
 }
 
 // handleMessage will process the given rpc message. The caller is resposible to
 // make sure only RPC messages are passed that are elligible for the BBA protocol.
-func (b *BBA) handleMessage(senderID uint64, msg AgreementMessage) (*AgreementOutput, error) {
+func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 	// Make sure we only handle messages that are sent in the same epoch.
 	if msg.Epoch != int(b.epoch) {
-		log.Warnf("received msg from other epoch %d my epoch %d", msg.Epoch, b.epoch)
-		return nil, nil
+		log.Debugf(
+			"id (%d) with epoch (%d) received msg from other epoch (%d)",
+			b.ID, b.epoch, msg.Epoch,
+		)
+		return nil
 	}
 	if b.done {
-		return nil, errors.New("bba already terminated")
+		return errors.New("bba instance already terminated")
 	}
 	switch t := msg.Message.(type) {
 	case *BvalRequest:
@@ -201,19 +207,18 @@ func (b *BBA) handleMessage(senderID uint64, msg AgreementMessage) (*AgreementOu
 	case *AuxRequest:
 		return b.handleAuxRequest(senderID, t.Value)
 	default:
-		return nil, fmt.Errorf("unknown BBA message received: %v", t)
+		return fmt.Errorf("unknown BBA message received: %v", t)
 	}
 }
 
 // handleBvalRequest processes the received binary value and returns an
 // AgreementOutput.
-func (b *BBA) handleBvalRequest(senderID uint64, val bool) (*AgreementOutput, error) {
-	output := NewAgreementOutput()
+func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 	b.recvBval[senderID] = val
 	lenBval := b.countBvals(val)
 
 	// When receiving n bval(b) messages from 2f+1 nodes: inputs := inputs u {b}
-	if lenBval == 2*(b.F+1) {
+	if lenBval == 2*b.F+1 {
 		wasEmptyBinValues := len(b.binValues) == 0
 		b.binValues = append(b.binValues, val)
 		// If inputs == 1 broadcast output(b) and handle the output ourselfs.
@@ -221,45 +226,39 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) (*AgreementOutput, er
 		// may only occure once per epoch.
 		if wasEmptyBinValues {
 			msg := NewAgreementMessage(int(b.epoch), &AuxRequest{val})
-			output.AddMessage(msg)
-			b.recvAux[b.ID] = val
+			b.addMessage(msg)
+			b.recvAux[b.pid] = val
 		}
-		decision, msg := b.maybeOutputAgreement()
-		output.AddMessage(msg)
-		output.Decision = decision
-		return output, nil
+		b.tryOutputAgreement()
+		return nil
 	}
 	// When receiving input(b) messages from f + 1 nodes, if inputs(b) is not
 	// been sent yet broadcast input(b) and handle the input ourselfs.
 	if lenBval == b.F+1 && !b.hasSentBval(val) {
 		b.sentBvals = append(b.sentBvals, val)
-		b.recvBval[b.ID] = val
+		b.recvBval[b.pid] = val
 		msg := NewAgreementMessage(int(b.epoch), &BvalRequest{val})
-		output.AddMessage(msg)
+		b.addMessage(msg)
 	}
-	return output, nil
+	return nil
 }
 
-func (b *BBA) handleAuxRequest(senderID uint64, val bool) (*AgreementOutput, error) {
+func (b *BBA) handleAuxRequest(senderID uint64, val bool) error {
 	b.recvAux[senderID] = val
 	if len(b.binValues) > 0 {
-		decision, msg := b.maybeOutputAgreement()
-		return &AgreementOutput{
-			Decision: decision,
-			Messages: []*AgreementMessage{msg},
-		}, nil
+		b.tryOutputAgreement()
 	}
-	return nil, nil
+	return nil
 }
 
-// maybeOutputAgreement waits until at least (N - f) output messages received,
+// tryOutputAgreement waits until at least (N - f) output messages received,
 // once the (N - f) messages are received, make a common coin and uses it to
 // compute the next decision estimate and output the optional decision value.
-func (b *BBA) maybeOutputAgreement() (interface{}, *AgreementMessage) {
+func (b *BBA) tryOutputAgreement() {
 	// Wait longer till eventually receive (N - F) aux messages.
 	lenOutputs, values := b.countOutputs()
 	if lenOutputs < b.N-b.F {
-		return nil, nil
+		return
 	}
 
 	coin := b.epoch%2 == 0
@@ -267,31 +266,34 @@ func (b *BBA) maybeOutputAgreement() (interface{}, *AgreementMessage) {
 	// Continue the BBA until both:
 	// - a value b is output in some epoch r
 	// - the value (coin r) = b for some round r' > r
-	if b.output != nil && b.output.(bool) == coin {
+	if b.done || b.decision != nil && b.decision.(bool) == coin {
+		log.Debugf("instance (%d) is done", b.ID)
 		b.done = true
 	}
 
-	log.Infof("advancing to the nex epoch! I have received %d aux messages", lenOutputs)
+	log.Debugf(
+		"id (%d) is advancing to the next epoch! (%d) received (%d) aux messages",
+		b.ID, b.epoch+1, lenOutputs,
+	)
 
 	// Start the next epoch.
 	b.advanceEpoch()
 
-	var decision interface{}
-	if len(values) < 1 {
+	if len(values) != 1 {
 		b.estimated = coin
-		decision = nil
 	} else {
 		b.estimated = values[0]
 		// Output may be set only once.
-		if b.output == nil && values[0] == coin {
-			b.output = coin
-			decision = b.output
+		if b.decision == nil && values[0] == coin {
+			b.output = values[0]
+			b.decision = values[0]
+			log.Debugf("id (%d) outputed a decision (%v)", b.ID, values[0])
 		}
 	}
 	estimated := b.estimated.(bool)
 	b.sentBvals = append(b.sentBvals, estimated)
 	msg := NewAgreementMessage(int(b.epoch), &BvalRequest{estimated})
-	return decision, msg
+	b.addMessage(msg)
 }
 
 // advanceEpoch will reset all the values that are bound to an epoch and increments
@@ -307,13 +309,14 @@ func (b *BBA) advanceEpoch() {
 // countOutputs returns the number of received (aux) messages, the corresponding
 // values that where also in our inputs.
 func (b *BBA) countOutputs() (int, []bool) {
+	m := map[bool]int{}
+	for i, val := range b.recvAux {
+		m[val] = int(i)
+	}
 	vals := []bool{}
-	for _, ok := range b.binValues {
-		for _, val := range b.recvAux {
-			if ok == val {
-				vals = append(vals, val)
-				break
-			}
+	for _, val := range b.binValues {
+		if _, ok := m[val]; ok {
+			vals = append(vals, val)
 		}
 	}
 	return len(b.recvAux), vals

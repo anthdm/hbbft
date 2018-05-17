@@ -2,13 +2,10 @@ package hbbft
 
 import (
 	"fmt"
-)
+	"sync"
 
-// ACSOutput holds the output of the Common Subset protocol.
-type ACSOutput struct {
-	Messages []interface{}
-	Result   interface{}
-}
+	log "github.com/sirupsen/logrus"
+)
 
 // ACSMessage represents a message sent between nodes in the ACS protocol.
 type ACSMessage struct {
@@ -44,7 +41,39 @@ type ACS struct {
 	rbcResults map[uint64][]byte
 	// Results of the Binary Byzantine Agreement.
 	bbaResults map[uint64]bool
+	// Final output of the ACS.
+	output map[uint64][]byte
+
+	lock sync.RWMutex
+	// Que of ACSMessages that need to be broadcasted after each received
+	// and processed a message.
+	messages []*ACSMessage
+
+	// control flow tuples for internal channel communication.
+	inputCh   chan acsInputTuple
+	messageCh chan acsMessageTuple
 }
+
+// Control flow structure for internal channel communication. Allowing us to
+// avoid the use of mutexes and eliminates race conditions.
+type (
+	acsMessageTuple struct {
+		senderID uint64
+		msg      *ACSMessage
+		err      chan error
+	}
+
+	acsInputResponse struct {
+		rbcMessages []*BroadcastMessage
+		acsMessages []*ACSMessage
+		err         error
+	}
+
+	acsInputTuple struct {
+		value    []byte
+		response chan acsInputResponse
+	}
+)
 
 // NewACS returns a new ACS instance configured with the given Config and node
 // ids.
@@ -55,168 +84,224 @@ func NewACS(cfg Config, nodes []uint64) *ACS {
 		bbaInstances: make(map[uint64]*BBA),
 		rbcResults:   make(map[uint64][]byte),
 		bbaResults:   make(map[uint64]bool),
+		messages:     []*ACSMessage{},
+		inputCh:      make(chan acsInputTuple),
+		messageCh:    make(chan acsMessageTuple),
 	}
+	// TODO: Probably not used anymore in the near future hence delete this.
 	// Add ourself the participating nodes.
-	nodes = append(nodes, cfg.ID)
+	// nodes = append(nodes, cfg.ID)
 	// Create all the instances for the participating nodes
 	for _, id := range nodes {
 		acs.rbcInstances[id] = NewRBC(cfg, id)
-		acs.bbaInstances[id] = NewBBA(cfg)
+		acs.bbaInstances[id] = NewBBA(cfg, id)
 	}
+	go acs.run()
 	return acs
 }
 
-// InputValue sets the input value for broadcast and returns a slice of messages
-// that need to be broadcasted into the network.
-func (a *ACS) InputValue(data []byte) ([]*ACSMessage, []interface{}, error) {
-	rbc, ok := a.rbcInstances[a.ID]
-	if !ok {
-		return nil, nil, fmt.Errorf("could not find our rbc instance %d", a.ID)
+// InputValue sets the input value for broadcast and returns an initial set of
+// Broadcast and ACS Messages to be broadcasted in the network.
+func (a *ACS) InputValue(val []byte) ([]*BroadcastMessage, []*ACSMessage, error) {
+	t := acsInputTuple{
+		value:    val,
+		response: make(chan acsInputResponse),
 	}
-	msgs, err := rbc.InputValue(data)
-	if err != nil {
-		return nil, nil, err
-	}
-	acsMsgs := make([]*ACSMessage, len(msgs))
-	for i, msg := range msgs {
-		acsMsgs[i] = &ACSMessage{a.ID, msg}
-	}
-	return acsMsgs, nil, nil
+	a.inputCh <- t
+	resp := <-t.response
+	return resp.rbcMessages, resp.acsMessages, resp.err
 }
 
 // HandleMessage handles incoming messages to ACS and redirects them to the
 // appropriate sub(protocol) instance.
-func (a *ACS) HandleMessage(senderID uint64, msg *ACSMessage) (*ACSOutput, error) {
+func (a *ACS) HandleMessage(senderID uint64, msg *ACSMessage) error {
+	t := acsMessageTuple{
+		senderID: senderID,
+		msg:      msg,
+		err:      make(chan error),
+	}
+	a.messageCh <- t
+	return <-t.err
+}
+
+// handleMessage handles incoming messages to ACS and redirects them to the
+// appropriate sub(protocol) instance.
+func (a *ACS) handleMessage(senderID uint64, msg *ACSMessage) error {
 	switch t := msg.Payload.(type) {
 	case *AgreementMessage:
 		return a.handleAgreement(senderID, msg.NodeID, t)
 	case *BroadcastMessage:
 		return a.handleBroadcast(senderID, msg.NodeID, t)
 	default:
-		return nil, fmt.Errorf("received unknown message: %v", t)
+		return fmt.Errorf("received unknown message (%v)", t)
 	}
 }
 
-// handleBroadcast processes the given BroadcastMessage and redirects it to the
-// proper RBC instance.
-func (a *ACS) handleBroadcast(senderID, proposerID uint64, msg *BroadcastMessage) (*ACSOutput, error) {
-	rbc, ok := a.rbcInstances[proposerID]
+// Messages returns the internal message que and set it back to empty.
+func (a *ACS) Messages() []*ACSMessage {
+	a.lock.RLock()
+	msgs := a.messages
+	a.lock.RUnlock()
+
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.messages = []*ACSMessage{}
+	return msgs
+}
+
+// Output will return the output of the ACS instance. If the output was not nil
+// then it will return the output else nil. Note that after consuming the output
+// its will be set to nil forever.
+func (a *ACS) Output() map[uint64][]byte {
+	if a.output != nil {
+		out := a.output
+		a.output = nil
+		return out
+	}
+	return nil
+}
+
+// inputValue sets the input value for broadcast and returns an initial set of
+// Broadcast and ACS Messages to be broadcasted in the network.
+func (a *ACS) inputValue(data []byte) ([]*BroadcastMessage, []*ACSMessage, error) {
+	rbc, ok := a.rbcInstances[a.ID]
 	if !ok {
-		return nil, fmt.Errorf("could not find the rbc instance for node %d", a.ID)
+		return nil, nil, fmt.Errorf("could not find rbc instance (%d)", a.ID)
 	}
-	output, err := rbc.HandleMessage(senderID, msg)
+	reqs, err := rbc.InputValue(data)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	messages := []interface{}{}
-	// If we have an rbc output.
-	if output != nil {
-		msg, err := a.handleBroadcastResult(a.ID, output)
-		if err != nil {
-			return nil, err
-		}
-		messages = append(messages, msg)
+	for _, msg := range rbc.Messages() {
+		a.addMessage(a.ID, msg)
 	}
-
-	msgs := rbc.Messages()
-	for _, msg := range msgs {
-		messages = append(messages, msg)
-	}
-	out := &ACSOutput{
-		Messages: messages,
-	}
-	return out, nil
+	a.tryCompleteAgreement()
+	return reqs, a.Messages(), nil
 }
 
-// handleAgreement processes the given AgreementMessage and redirects it to the
-// proper BBA instance.
-func (a *ACS) handleAgreement(senderID, proposerID uint64, msg *AgreementMessage) (*ACSOutput, error) {
-	bba, ok := a.bbaInstances[proposerID]
+func (a *ACS) run() {
+	for {
+		select {
+		case t := <-a.inputCh:
+			bmsg, amsg, err := a.inputValue(t.value)
+			t.response <- acsInputResponse{bmsg, amsg, err}
+		case t := <-a.messageCh:
+			t.err <- a.handleMessage(t.senderID, t.msg)
+		}
+	}
+}
+
+// handleAgreement processes the received AgreementMessage from sender (sid)
+// for a value proposed by the proposing node (pid).
+func (a *ACS) handleAgreement(sid, pid uint64, msg *AgreementMessage) error {
+	bba, ok := a.bbaInstances[pid]
 	if !ok {
-		return nil, fmt.Errorf("could not find the bba instance for node %d", a.ID)
+		return fmt.Errorf("could not find bba instance for (%d)", pid)
 	}
-	output, err := bba.HandleMessage(senderID, *msg)
-	if err != nil {
-		return nil, err
+	if err := bba.HandleMessage(sid, msg); err != nil {
+		return err
 	}
-	if output == nil {
-		return nil, nil
+	for _, msg := range bba.Messages() {
+		a.addMessage(pid, msg)
 	}
-
-	messages := []interface{}{}
-	if output.Decision != nil {
-		msgs, err := a.handleAgreementResult(proposerID, output.Decision.(bool))
-		if err != nil {
-			return nil, err
-		}
-		for _, msg := range msgs {
-			if msg != nil {
-				messages = append(messages, msg)
-			}
+	// If we have an agreement output.
+	if output := bba.Output(); output != nil {
+		if err := a.handleAgreementOutput(pid, output.(bool)); err != nil {
+			return err
 		}
 	}
-	for _, msg := range output.Messages {
-		if msg != nil {
-			messages = append(messages, msg)
-		}
-	}
-	return &ACSOutput{
-		Messages: messages,
-		Result:   a.maybeCompleteAgreement(),
-	}, nil
+	a.tryCompleteAgreement()
+	return nil
 }
 
-func (a *ACS) handleAgreementResult(proposerID uint64, result bool) ([]*AgreementMessage, error) {
-	a.bbaResults[proposerID] = result
-	if !result || a.countTruthyAgreements() < a.N-a.F {
-		return nil, nil
+// When a bba has produced an output it will get evaluated and processed here.
+func (a *ACS) handleAgreementOutput(pid uint64, val bool) error {
+	a.bbaResults[pid] = val
+	if !val || a.countTruthyAgreements() < a.N-a.F {
+		return nil
 	}
-	// When receiving true from at least N - f nodes, provide input 0 to each
-	// bba instance that has not provided input yet.
-	messages := []*AgreementMessage{}
+	// When received 1 from at least (N - f) instances of BA, provide input 0.
+	// to each other instance of BBA that has not provided his input.
 	for _, bba := range a.bbaInstances {
 		if bba.AcceptInput() {
-			msg, err := bba.InputValue(false)
+			msg, err := bba.InputValue(val)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			messages = append(messages, msg)
+			a.addMessage(a.ID, msg)
 		}
 	}
-	return messages, nil
+	return nil
 }
 
-// handleBroadcastResult is triggered when there is an ouput value of the rbc
-// protocol. And start the bba protocol accordingly for this rbc outcome.
-// Upon delivery of v from RBC, if input has not yet been provided to BBA, then
-// provide input 1 to BBA.
-func (a *ACS) handleBroadcastResult(proposerID uint64, result []byte) (*AgreementMessage, error) {
-	a.rbcResults[proposerID] = result
-	bba, ok := a.bbaInstances[proposerID]
+// handleBroadcast processes the received BroadcastMessage.
+func (a *ACS) handleBroadcast(sid, pid uint64, msg *BroadcastMessage) error {
+	rbc, ok := a.rbcInstances[pid]
 	if !ok {
-		return nil, fmt.Errorf("could not find the bba instance for id %d", proposerID)
+		return fmt.Errorf("could not find rbc instance for (%d)", pid)
 	}
-	return bba.InputValue(true)
-}
-
-// maybeCompleteAgreement checks if all the instances of bba are terminated.
-func (a *ACS) maybeCompleteAgreement() [][]byte {
-	// Check if all the bba instances are done.
-	for _, bba := range a.bbaInstances {
-		if !bba.done {
+	if err := rbc.HandleMessage(sid, msg); err != nil {
+		return err
+	}
+	for _, msg := range rbc.Messages() {
+		a.addMessage(pid, msg)
+	}
+	// If we got a broadcast output set the result and handle that the output
+	// is received for the proposing node pid.
+	if output := rbc.Output(); output != nil {
+		log.Debugf("(%d) rbc instance has produced an output (%v)", pid, output)
+		a.rbcResults[pid] = output
+		if err := a.handleBroadcastOutput(pid); err != nil {
 			return nil
 		}
 	}
-	// Collect all the id's of nodes that have decided true.
-	ids := []uint64{}
+	return nil
+}
+
+// When value (v_i) is delivered from from (RBC_i) and the input is not been
+// provided to (BA_i) we provide 1 to (BA_i).
+func (a *ACS) handleBroadcastOutput(pid uint64) error {
+	bba, ok := a.bbaInstances[pid]
+	if !ok {
+		return fmt.Errorf("could not find bba instance for (%d)", pid)
+	}
+	if bba.AcceptInput() {
+		msg, err := bba.InputValue(true)
+		if err != nil {
+			return err
+		}
+		a.addMessage(pid, msg)
+	}
+	a.tryCompleteAgreement()
+	return nil
+}
+
+func (a *ACS) tryCompleteAgreement() {
+	if len(a.bbaResults) < a.N {
+		return
+	}
+	// At this point all bba instances have provided their output.
+	nodesThatProvidedTrue := []uint64{}
 	for id, ok := range a.bbaResults {
 		if ok {
-			ids = append(ids, id)
+			nodesThatProvidedTrue = append(nodesThatProvidedTrue, id)
 		}
 	}
-	// TODO ..
-	return nil
+	bcResults := make(map[uint64][]byte)
+	for _, id := range nodesThatProvidedTrue {
+		val, _ := a.rbcResults[id]
+		bcResults[id] = val
+	}
+	if len(nodesThatProvidedTrue) == len(bcResults) {
+		a.output = bcResults
+	}
+}
+
+// addMessage adds the given messages as ACSMessage to the message que.
+func (a *ACS) addMessage(from uint64, msg interface{}) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.messages = append(a.messages, &ACSMessage{from, msg})
 }
 
 // countTruthyAgreements returns the number of truthy received agreement messages.

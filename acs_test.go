@@ -3,57 +3,29 @@ package hbbft
 import (
 	"fmt"
 	"log"
-	"reflect"
 	"testing"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
-// TODO
-// func TestNormalACSRound(t *testing.T) {
-// 	transports := makeTransports(4)
-// 	connectTransports(transports)
-
-// 	var (
-// 		aa    = make([]testACSEngine, len(transports))
-// 		resCh = make(chan acsResult)
-// 		value = []byte("the world smallest violin")
-// 		nodes = []uint64{0, 1, 2, 3}
-// 	)
-
-// 	for i, tr := range transports {
-// 		participants := []uint64{}
-// 		for ii := 0; ii < len(nodes); ii++ {
-// 			if ii == i {
-// 				continue
-// 			}
-// 			participants = append(participants, nodes[ii])
-// 		}
-// 		aa[i] = newTestACSEngine(resCh,
-// 			NewACS(
-// 				Config{
-// 					ID: uint64(i),
-// 					N:  len(transports),
-// 				}, participants,
-// 			), tr)
-// 		go aa[i].run()
-// 	}
-
-// 	var wg sync.WaitGroup
-// 	wg.Add(4)
-// 	// Start a routine that will collect the results from all the nodes.
-// 	go func() {
-// 		for {
-// 			res := <-resCh
-// 			t.Log(res)
-// 			wg.Done()
-// 		}
-// 	}()
-
-// 	aa[0].propose(value)
-// 	wg.Wait()
-// }
+func TestACSWithNormalNodes(t *testing.T) {
+	var (
+		resultCh = make(chan map[uint64][]byte)
+		nodes    = makeACSNodes(4, 0, resultCh)
+		done     chan struct{}
+	)
+	go func() {
+		for {
+			res := <-resultCh
+			_ = res
+		}
+	}()
+	assert.Nil(t, nodes[0].inputValue([]byte("aaaaaaaaaa")))
+	assert.Nil(t, nodes[1].inputValue([]byte("bbbbbbbbbb")))
+	assert.Nil(t, nodes[2].inputValue([]byte("cccccccccc")))
+	assert.Nil(t, nodes[3].inputValue([]byte("dddddddddd")))
+	<-done
+}
 
 func TestNewACS(t *testing.T) {
 	nodes := []uint64{1, 2, 3}
@@ -68,70 +40,91 @@ func TestNewACS(t *testing.T) {
 		_, ok := acs.bbaInstances[i]
 		assert.True(t, ok)
 	}
-
 	for i := range acs.bbaInstances {
 		_, ok := acs.bbaInstances[i]
 		assert.True(t, ok)
 	}
 }
 
-type acsResult struct {
-	nodeID uint64
-	value  []byte
-}
-
-// simple engine to test ACS independently.
-type testACSEngine struct {
+type testACSNode struct {
 	acs       *ACS
-	rpcCh     <-chan RPC
-	resCh     chan acsResult
 	transport Transport
+	resultCh  chan map[uint64][]byte
+	rpcCh     <-chan RPC
 }
 
-func newTestACSEngine(resCh chan acsResult, acs *ACS, tr Transport) testACSEngine {
-	return testACSEngine{
+func newTestACSNode(acs *ACS, tr Transport, resultCh chan map[uint64][]byte) *testACSNode {
+	return &testACSNode{
+		resultCh:  resultCh,
 		acs:       acs,
-		rpcCh:     tr.Consume(),
-		resCh:     resCh,
 		transport: tr,
+		rpcCh:     tr.Consume(),
 	}
 }
 
-func (e testACSEngine) run() {
+func (n *testACSNode) run() {
 	for {
 		select {
-		case rpc := <-e.rpcCh:
-			acsMessage := rpc.Payload.(*ACSMessage)
-			out, err := e.acs.HandleMessage(rpc.NodeID, acsMessage)
-			if err != nil {
+		case rpc := <-n.rpcCh:
+			msg := rpc.Payload.(*ACSMessage)
+			if err := n.acs.HandleMessage(rpc.NodeID, msg); err != nil {
 				log.Println(err)
 				continue
 			}
-			if out != nil {
-				for _, msg := range out.Messages {
-					logrus.Info(reflect.TypeOf(msg))
-					go e.transport.Broadcast(e.acs.ID, &ACSMessage{acsMessage.NodeID, msg})
-				}
+			if output := n.acs.Output(); output != nil {
+				n.resultCh <- output
+				log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
 			}
-			// e.resCh <- acsResult{}
+			for _, msg := range n.acs.Messages() {
+				go n.transport.Broadcast(n.acs.ID, msg)
+			}
 		}
 	}
 }
 
-func (e testACSEngine) propose(data []byte) error {
-	a, _, err := e.acs.InputValue(data)
+func (n *testACSNode) inputValue(value []byte) error {
+	reqs, msgs, err := n.acs.InputValue(value)
 	if err != nil {
 		return err
 	}
-	msgs := make([]interface{}, len(a))
-	for i, msg := range a {
-		msgs[i] = msg
+	mm := make([]interface{}, len(reqs))
+	for i := 0; i < len(reqs); i++ {
+		mm[i] = &ACSMessage{n.acs.ID, reqs[i]}
 	}
-	go e.transport.SendProofMessages(e.acs.ID, msgs)
+	go n.transport.SendProofMessages(n.acs.ID, mm)
+	for _, msg := range msgs {
+		go n.transport.Broadcast(n.acs.ID, msg)
+	}
 	return nil
 }
 
-// makeTransports is a test helper function for making n transports.
+func makeACSNodes(n, pid int, resultCh chan map[uint64][]byte) []*testACSNode {
+	var (
+		transports = makeTransports(n)
+		nodes      = make([]*testACSNode, len(transports))
+		ids        = makeids(n)
+	)
+	connectTransports(transports)
+	for i := 0; i < len(nodes); i++ {
+		cfg := Config{
+			N:  len(nodes),
+			ID: uint64(i),
+		}
+		nodes[i] = newTestACSNode(NewACS(cfg, ids), transports[i], resultCh)
+		go nodes[i].run()
+	}
+	return nodes
+}
+
+func makeids(n int) []uint64 {
+	ids := make([]uint64, n)
+	for i := 0; i < n; i++ {
+		ids[i] = uint64(i)
+	}
+	return ids
+}
+
+// makeTransports is a test helper function for making n number of transports.
 func makeTransports(n int) []Transport {
 	transports := make([]Transport, n)
 	for i := 0; i < n; i++ {

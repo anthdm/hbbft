@@ -16,8 +16,6 @@ type Config struct {
 	ID uint64
 	// Number of nodes and number of tolerate faulty nodes.
 	N, F int
-	// The underlying transport for exchanging messages.
-	Transport Transport
 }
 
 // BroadcastMessage holds the payload sent between nodes in the rbc protocol.
@@ -57,27 +55,25 @@ func (p proofs) Less(i, j int) bool { return p[i].Index < p[j].Index }
 type RBC struct {
 	// Config holds the configuration.
 	Config
-
 	// proposerID is the ID of the proposing node of this RB instance.
 	proposerID uint64
-
 	// The reedsolomon encoder to encode the proposed value into shards.
 	enc reedsolomon.Encoder
-
 	// recvReadys is a mapping between the sender and the root hash that was
 	// inluded in the ReadyRequest.
 	recvReadys map[uint64][]byte
-
 	// revcEchos is a mapping between the sender and the EchoRequest.
 	recvEchos map[uint64]*EchoRequest
-
 	// Number of the parity and data shards that will be used for erasure encoding
 	// the given value.
 	numParityShards, numDataShards int
-
-	echoSent, readySent, outputDecoded bool
-
+	// Que of BroadcastMessages that need to be broadcasted after each received
+	// and processed a message.
 	messages []*BroadcastMessage
+	// Booleans fields to determine operations on the internal state.
+	echoSent, readySent, outputDecoded bool
+	// The actual output this instance has produced.
+	output []byte
 }
 
 // NewRBC returns a new instance of the ReliableBroadcast configured
@@ -122,7 +118,7 @@ func (r *RBC) InputValue(data []byte) ([]*BroadcastMessage, error) {
 	// The first request is for ourselfs. The rests is distributed under the
 	// participants.
 	proof := reqs[0].Payload.(*ProofRequest)
-	if _, err := r.handleProofRequest(r.ID, proof); err != nil {
+	if err := r.handleProofRequest(r.ID, proof); err != nil {
 		return nil, err
 	}
 	return reqs[1:], nil
@@ -131,7 +127,7 @@ func (r *RBC) InputValue(data []byte) ([]*BroadcastMessage, error) {
 // HandleMessage will process the given rpc message and will return a possible
 // outcome. The caller is resposible to make sure only RPC messages are passed
 // that are elligible for the RBC protocol.
-func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) ([]byte, error) {
+func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
 	switch t := msg.Payload.(type) {
 	case *ProofRequest:
 		return r.handleProofRequest(senderID, t)
@@ -140,7 +136,7 @@ func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) ([]byte, err
 	case *ReadyRequest:
 		return r.handleReadyRequest(senderID, t)
 	default:
-		return nil, fmt.Errorf("invalid RBC protocol message: %+v", msg)
+		return fmt.Errorf("invalid RBC protocol message: %+v", msg)
 	}
 }
 
@@ -153,20 +149,32 @@ func (r *RBC) Messages() []*BroadcastMessage {
 	return msgs
 }
 
+// Output will return the output of the rbc instance. If the output was not nil
+// then it will return the output else nil. Note that after consuming the output
+// its will be set to nil forever.
+func (r *RBC) Output() []byte {
+	if r.output != nil {
+		out := r.output
+		r.output = nil
+		return out
+	}
+	return nil
+}
+
 // When a node receives a Proof from a proposer it broadcasts the proof as an
 // EchoRequest to the network after validating its content.
-func (r *RBC) handleProofRequest(senderID uint64, req *ProofRequest) ([]byte, error) {
+func (r *RBC) handleProofRequest(senderID uint64, req *ProofRequest) error {
 	if senderID != r.proposerID {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"receiving proof from (%d) that is not from the proposing node (%d)",
 			senderID, r.proposerID,
 		)
 	}
 	if r.echoSent {
-		return nil, fmt.Errorf("received proof from (%d) more the once", senderID)
+		return fmt.Errorf("received proof from (%d) more the once", senderID)
 	}
 	if !validateProof(req) {
-		return nil, fmt.Errorf("received invalid proof from (%d)", senderID)
+		return fmt.Errorf("received invalid proof from (%d)", senderID)
 	}
 	r.echoSent = true
 	echo := &EchoRequest{*req}
@@ -181,19 +189,19 @@ func (r *RBC) handleProofRequest(senderID uint64, req *ProofRequest) ([]byte, er
 // node receives (f + 1) ReadyRequests we know that at least one good node has
 // sent Ready, hence also knows that everyone will be able to decode eventually
 // and broadcast ready itself.
-func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) ([]byte, error) {
+func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) error {
 	if _, ok := r.recvEchos[senderID]; ok {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"received multiple echos from (%d) my id (%d)", senderID, r.ID)
 	}
 	if !validateProof(&req.ProofRequest) {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"received invalid proof from (%d) my id (%d)", senderID, r.ID)
 	}
 
 	r.recvEchos[senderID] = req
 	if r.readySent || r.countEchos(req.RootHash) < r.N-r.F {
-		return r.maybeDecodeValue(req.RootHash), nil
+		return r.tryDecodeValue(req.RootHash)
 	}
 
 	r.readySent = true
@@ -208,9 +216,9 @@ func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) ([]byte, erro
 // ready itself. Eventually a node with (2 * f + 1) readys and (f + 1) echos
 // will decode and ouput the value, knowing that every other good node will
 // do the same.
-func (r *RBC) handleReadyRequest(senderID uint64, req *ReadyRequest) ([]byte, error) {
+func (r *RBC) handleReadyRequest(senderID uint64, req *ReadyRequest) error {
 	if _, ok := r.recvReadys[senderID]; ok {
-		return nil, fmt.Errorf("received multiple readys from (%d)", senderID)
+		return fmt.Errorf("received multiple readys from (%d)", senderID)
 	}
 	r.recvReadys[senderID] = req.RootHash
 
@@ -219,16 +227,15 @@ func (r *RBC) handleReadyRequest(senderID uint64, req *ReadyRequest) ([]byte, er
 		ready := &ReadyRequest{req.RootHash}
 		r.messages = append(r.messages, &BroadcastMessage{ready})
 	}
-	return r.maybeDecodeValue(req.RootHash), nil
+	return r.tryDecodeValue(req.RootHash)
 }
 
-// maybeDecodeValue will check whether the Value (V) can be decoded from the received
-// shards. Returns nil if not, value (V) if decoded has succeed.
-func (r *RBC) maybeDecodeValue(hash []byte) []byte {
+// tryDecodeValue will check whether the Value (V) can be decoded from the received
+// shards. If the decode was successfull output will be set the this value.
+func (r *RBC) tryDecodeValue(hash []byte) error {
 	if r.outputDecoded || r.countReadys(hash) <= 2*r.F || r.countEchos(hash) <= r.F {
 		return nil
 	}
-
 	// At this point we can decode the shards. First we create a new slice of
 	// only sortable proof values.
 	r.outputDecoded = true
@@ -250,7 +257,8 @@ func (r *RBC) maybeDecodeValue(hash []byte) []byte {
 	for _, data := range shards[:r.numDataShards] {
 		value = append(value, data...)
 	}
-	return value
+	r.output = value
+	return nil
 }
 
 // countEchos count the number of echos with the given hash.

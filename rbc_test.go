@@ -25,9 +25,8 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 		ee[i] = newTestRBCEngine(resCh,
 			NewRBC(
 				Config{
-					ID:        uint64(i),
-					N:         len(transports),
-					Transport: tr,
+					ID: uint64(i),
+					N:  len(transports),
 				}, proposerID,
 			), tr)
 		go ee[i].run()
@@ -146,17 +145,17 @@ func (e testRBCEngine) run() {
 	for {
 		select {
 		case rpc := <-e.rpcCh:
-			val, err := e.rbc.HandleMessage(rpc.NodeID, rpc.Payload.(*BroadcastMessage))
+			err := e.rbc.HandleMessage(rpc.NodeID, rpc.Payload.(*BroadcastMessage))
 			if err != nil {
 				log.Println(err)
 			}
 			for _, msg := range e.rbc.Messages() {
 				go e.transport.Broadcast(e.rbc.ID, msg)
 			}
-			if val != nil {
+			if output := e.rbc.Output(); output != nil {
 				e.resCh <- bcResult{
 					nodeID: e.rbc.ID,
-					value:  val,
+					value:  output,
 				}
 			}
 		}
