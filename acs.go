@@ -9,7 +9,9 @@ import (
 
 // ACSMessage represents a message sent between nodes in the ACS protocol.
 type ACSMessage struct {
-	NodeID  uint64
+	// Unique identifier of the "proposing" node.
+	ProposerID uint64
+	// Actual payload beeing sent.
 	Payload interface{}
 }
 
@@ -88,9 +90,6 @@ func NewACS(cfg Config, nodes []uint64) *ACS {
 		inputCh:      make(chan acsInputTuple),
 		messageCh:    make(chan acsMessageTuple),
 	}
-	// TODO: Probably not used anymore in the near future hence delete this.
-	// Add ourself the participating nodes.
-	// nodes = append(nodes, cfg.ID)
 	// Create all the instances for the participating nodes
 	for _, id := range nodes {
 		acs.rbcInstances[id] = NewRBC(cfg, id)
@@ -129,9 +128,9 @@ func (a *ACS) HandleMessage(senderID uint64, msg *ACSMessage) error {
 func (a *ACS) handleMessage(senderID uint64, msg *ACSMessage) error {
 	switch t := msg.Payload.(type) {
 	case *AgreementMessage:
-		return a.handleAgreement(senderID, msg.NodeID, t)
+		return a.handleAgreement(senderID, msg.ProposerID, t)
 	case *BroadcastMessage:
-		return a.handleBroadcast(senderID, msg.NodeID, t)
+		return a.handleBroadcast(senderID, msg.ProposerID, t)
 	default:
 		return fmt.Errorf("received unknown message (%v)", t)
 	}
@@ -246,7 +245,7 @@ func (a *ACS) handleBroadcast(sid, pid uint64, msg *BroadcastMessage) error {
 	for _, msg := range rbc.Messages() {
 		a.addMessage(pid, msg)
 	}
-	// If we got a broadcast output set the result and handle that the output
+	// If we got a broadcast output, set the result and handle that the output
 	// is received for the proposing node pid.
 	if output := rbc.Output(); output != nil {
 		log.Debugf("(%d) rbc instance has produced an output (%v)", pid, output)
