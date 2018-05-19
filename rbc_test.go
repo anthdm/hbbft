@@ -10,31 +10,54 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestOneNormalBroadcastRound(t *testing.T) {
-	transports := makeTransports(4)
-	connectTransports(transports)
-
+// Test RBC where 1 node will not provide its value. We use 4 nodes that will
+// tolerate 1 faulty node. The 3 good nodes should be able te reconstruct the
+// proposed value just fine.
+func TestRBC1FaultyNode(t *testing.T) {
 	var (
-		ee         = make([]testRBCEngine, len(transports))
-		resCh      = make(chan bcResult)
-		value      = []byte("foo bar foobar")
-		proposerID uint64
+		n          = 4
+		pid        = 0
+		resCh      = make(chan bcResult, 3)
+		value      = []byte("not a normal looking payload")
+		faultyNode = uint64(3)
 	)
-
-	for i, tr := range transports {
-		ee[i] = newTestRBCEngine(resCh,
-			NewRBC(
-				Config{
-					ID: uint64(i),
-					N:  len(transports),
-				}, proposerID,
-			), tr)
-		go ee[i].run()
-	}
+	nodes := makeRBCNodes(n, pid, resCh)
 
 	var wg sync.WaitGroup
-	wg.Add(4)
-	// Start a routine that will collect the results from all the nodes.
+	wg.Add(n - 1)
+	// Start a routine that will collect the results from all the good nodes.
+	// In this case 3 results should be equal to the proposed value.
+	go func() {
+		for {
+			res := <-resCh
+			// Test that we really have a faulty node.
+			assert.NotEqual(t, res.nodeID, faultyNode)
+			assert.Equal(t, value, res.value)
+			wg.Done()
+		}
+	}()
+
+	// Faulty node will not provide its input.
+	nodes[faultyNode].faulty = true
+	assert.Nil(t, nodes[pid].inputValue(value))
+	wg.Wait()
+}
+
+// Test RBC with 4 good nodes in the network. We expect all 4 nodes to output
+// the proposed value.
+func TestRBC4GoodNodes(t *testing.T) {
+	var (
+		n     = 4
+		pid   = 0
+		resCh = make(chan bcResult)
+		value = []byte("not a normal looking payload")
+	)
+	nodes := makeRBCNodes(n, pid, resCh)
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	// Start a routine that will collect the results from all the nodes. In this
+	// case we expect all 4 nodes to ouput the proposed value.
 	go func() {
 		for {
 			res := <-resCh
@@ -43,9 +66,7 @@ func TestOneNormalBroadcastRound(t *testing.T) {
 		}
 	}()
 
-	// Let the first node propose a value to the others.
-	err := ee[proposerID].propose(value)
-	assert.Nil(t, err)
+	assert.Nil(t, nodes[pid].inputValue(value))
 	wg.Wait()
 }
 
@@ -81,6 +102,21 @@ func TestNewReliableBroadcast(t *testing.T) {
 	cfg = Config{N: 100, F: 10}
 	rb = NewRBC(cfg, 0)
 	assertState(t, rb, cfg)
+}
+
+func TestRBCOutputIsNilAfterConsuming(t *testing.T) {
+	rbc := NewRBC(Config{N: 4}, 0)
+	output := []byte("a")
+	rbc.output = output
+	assert.Equal(t, output, rbc.Output())
+	assert.Nil(t, rbc.Output())
+}
+
+func TestRBCMessagesIsEmptyAfterConsuming(t *testing.T) {
+	rbc := NewRBC(Config{N: 4}, 0)
+	rbc.messages = []*BroadcastMessage{&BroadcastMessage{}}
+	assert.Equal(t, 1, len(rbc.Messages()))
+	assert.Equal(t, 0, len(rbc.Messages()))
 }
 
 func TestMakeShards(t *testing.T) {
@@ -126,14 +162,15 @@ type bcResult struct {
 
 // simple engine to test RBC independently.
 type testRBCEngine struct {
+	faulty    bool
 	rbc       *RBC
 	rpcCh     <-chan RPC
 	resCh     chan bcResult
 	transport Transport
 }
 
-func newTestRBCEngine(resCh chan bcResult, rbc *RBC, tr Transport) testRBCEngine {
-	return testRBCEngine{
+func newTestRBCEngine(resCh chan bcResult, rbc *RBC, tr Transport) *testRBCEngine {
+	return &testRBCEngine{
 		rbc:       rbc,
 		rpcCh:     tr.Consume(),
 		resCh:     resCh,
@@ -141,18 +178,24 @@ func newTestRBCEngine(resCh chan bcResult, rbc *RBC, tr Transport) testRBCEngine
 	}
 }
 
-func (e testRBCEngine) run() {
+func (e *testRBCEngine) run() {
 	for {
 		select {
 		case rpc := <-e.rpcCh:
 			err := e.rbc.HandleMessage(rpc.NodeID, rpc.Payload.(*BroadcastMessage))
 			if err != nil {
 				log.Println(err)
+				continue
 			}
 			for _, msg := range e.rbc.Messages() {
 				go e.transport.Broadcast(e.rbc.ID, msg)
 			}
 			if output := e.rbc.Output(); output != nil {
+				// Faulty node will refuse to send its produced output, causing
+				// potential disturb of conensus liveness.
+				if e.faulty {
+					continue
+				}
 				e.resCh <- bcResult{
 					nodeID: e.rbc.ID,
 					value:  output,
@@ -162,7 +205,7 @@ func (e testRBCEngine) run() {
 	}
 }
 
-func (e testRBCEngine) propose(data []byte) error {
+func (e *testRBCEngine) inputValue(data []byte) error {
 	reqs, err := e.rbc.InputValue(data)
 	if err != nil {
 		return err
@@ -173,6 +216,24 @@ func (e testRBCEngine) propose(data []byte) error {
 	}
 	go e.transport.SendProofMessages(e.rbc.ID, msgs)
 	return nil
+}
+
+func makeRBCNodes(n, pid int, resCh chan bcResult) []*testRBCEngine {
+	transports := makeTransports(n)
+	connectTransports(transports)
+	nodes := make([]*testRBCEngine, len(transports))
+
+	for i, tr := range transports {
+		nodes[i] = newTestRBCEngine(resCh,
+			NewRBC(
+				Config{
+					ID: uint64(i),
+					N:  len(transports),
+				}, uint64(pid),
+			), tr)
+		go nodes[i].run()
+	}
+	return nodes
 }
 
 func connectTransports(tt []Transport) {
