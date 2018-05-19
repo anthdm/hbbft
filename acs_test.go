@@ -28,13 +28,16 @@ func TestACSWithNormalNodes(t *testing.T) {
 }
 
 func TestNewACS(t *testing.T) {
-	nodes := []uint64{1, 2, 3}
-	acs := NewACS(Config{
-		N:  4,
-		ID: 4,
-	}, nodes)
-	assert.Equal(t, 4, len(acs.bbaInstances))
-	assert.Equal(t, 4, len(acs.rbcInstances))
+	var (
+		id    = uint64(0)
+		nodes = []uint64{0, 1, 2, 3}
+		acs   = NewACS(Config{
+			N:  len(nodes),
+			ID: id,
+		}, nodes)
+	)
+	assert.Equal(t, len(nodes), len(acs.bbaInstances))
+	assert.Equal(t, len(nodes), len(acs.rbcInstances))
 
 	for i := range acs.rbcInstances {
 		_, ok := acs.bbaInstances[i]
@@ -44,6 +47,24 @@ func TestNewACS(t *testing.T) {
 		_, ok := acs.bbaInstances[i]
 		assert.True(t, ok)
 	}
+	assert.Equal(t, id, acs.ID)
+}
+
+func TestACSOutputIsNilAfterConsuming(t *testing.T) {
+	acs := NewACS(Config{N: 4}, []uint64{1})
+	output := map[uint64][]byte{
+		1: []byte("this is it"),
+	}
+	acs.output = output
+	assert.Equal(t, output, acs.Output())
+	assert.Nil(t, acs.Output())
+}
+
+func TestACSMessagesIsEmptyAfterConsuming(t *testing.T) {
+	acs := NewACS(Config{N: 4}, []uint64{1})
+	acs.messages = []*ACSMessage{&ACSMessage{}}
+	assert.Equal(t, 1, len(acs.Messages()))
+	assert.Equal(t, 0, len(acs.Messages()))
 }
 
 type testACSNode struct {
@@ -73,7 +94,7 @@ func (n *testACSNode) run() {
 			}
 			if output := n.acs.Output(); output != nil {
 				n.resultCh <- output
-				log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
+				// log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
 			}
 			for _, msg := range n.acs.Messages() {
 				go n.transport.Broadcast(n.acs.ID, msg)
