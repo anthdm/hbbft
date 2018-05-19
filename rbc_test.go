@@ -224,13 +224,11 @@ func makeRBCNodes(n, pid int, resCh chan bcResult) []*testRBCEngine {
 	nodes := make([]*testRBCEngine, len(transports))
 
 	for i, tr := range transports {
-		nodes[i] = newTestRBCEngine(resCh,
-			NewRBC(
-				Config{
-					ID: uint64(i),
-					N:  len(transports),
-				}, uint64(pid),
-			), tr)
+		cfg := Config{
+			ID: uint64(i),
+			N:  len(transports),
+		}
+		nodes[i] = newTestRBCEngine(resCh, NewRBC(cfg, uint64(pid)), tr)
 		go nodes[i].run()
 	}
 	return nodes
