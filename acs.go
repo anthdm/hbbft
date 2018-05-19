@@ -220,14 +220,15 @@ func (a *ACS) handleAgreementOutput(pid uint64, val bool) error {
 		return nil
 	}
 	// When received 1 from at least (N - f) instances of BA, provide input 0.
-	// to each other instance of BBA that has not provided his input.
+	// to each other instance of BBA that has not provided his input yet.
 	for _, bba := range a.bbaInstances {
 		if bba.AcceptInput() {
-			msg, err := bba.InputValue(val)
-			if err != nil {
+			if err := bba.InputValue(false); err != nil {
 				return err
 			}
-			a.addMessage(a.ID, msg)
+			for _, msg := range bba.Messages() {
+				a.addMessage(a.ID, msg)
+			}
 		}
 	}
 	return nil
@@ -265,11 +266,12 @@ func (a *ACS) handleBroadcastOutput(pid uint64) error {
 		return fmt.Errorf("could not find bba instance for (%d)", pid)
 	}
 	if bba.AcceptInput() {
-		msg, err := bba.InputValue(true)
-		if err != nil {
+		if err := bba.InputValue(true); err != nil {
 			return err
 		}
-		a.addMessage(pid, msg)
+		for _, msg := range bba.Messages() {
+			a.addMessage(pid, msg)
+		}
 	}
 	a.tryCompleteAgreement()
 	return nil

@@ -1,8 +1,8 @@
 package hbbft
 
 import (
-	"errors"
 	"fmt"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -54,8 +54,13 @@ type BBA struct {
 	// output and estimated of the bba protocol. This can be either nil or a
 	// boolean.
 	output, estimated, decision interface{}
+	//delayedMessages are messages that are received by a node that is already
+	// in a later epoch. These messages will be qued an handled the next epoch.
+	delayedMessages []delayedMessage
+
+	lock sync.RWMutex
 	// Que of AgreementMessages that need to be broadcasted after each received
-	// and processed a message.
+	// message.
 	messages []*AgreementMessage
 
 	// control flow tuples for internal channel communication.
@@ -69,15 +74,16 @@ func NewBBA(cfg Config, pid uint64) *BBA {
 		cfg.F = (cfg.N - 1) / 3
 	}
 	bba := &BBA{
-		Config:    cfg,
-		pid:       pid,
-		recvBval:  make(map[uint64]bool),
-		recvAux:   make(map[uint64]bool),
-		sentBvals: []bool{},
-		binValues: []bool{},
-		inputCh:   make(chan bbaInputTuple),
-		messageCh: make(chan bbaMessageTuple),
-		messages:  []*AgreementMessage{},
+		Config:          cfg,
+		pid:             pid,
+		recvBval:        make(map[uint64]bool),
+		recvAux:         make(map[uint64]bool),
+		sentBvals:       []bool{},
+		binValues:       []bool{},
+		inputCh:         make(chan bbaInputTuple),
+		messageCh:       make(chan bbaMessageTuple),
+		messages:        []*AgreementMessage{},
+		delayedMessages: []delayedMessage{},
 	}
 	go bba.run()
 	return bba
@@ -92,27 +98,26 @@ type (
 		err      chan error
 	}
 
-	bbaInputResponse struct {
-		msg *AgreementMessage
-		err error
+	bbaInputTuple struct {
+		value bool
+		err   chan error
 	}
 
-	bbaInputTuple struct {
-		value    bool
-		response chan bbaInputResponse
+	delayedMessage struct {
+		sid uint64
+		msg *AgreementMessage
 	}
 )
 
 // InputValue will set the given val as the initial value to be proposed in the
 // Agreement and returns an initial AgreementMessage or an error.
-func (b *BBA) InputValue(val bool) (*AgreementMessage, error) {
+func (b *BBA) InputValue(val bool) error {
 	t := bbaInputTuple{
-		value:    val,
-		response: make(chan bbaInputResponse),
+		value: val,
+		err:   make(chan error),
 	}
 	b.inputCh <- t
-	resp := <-t.response
-	return resp.msg, resp.err
+	return <-t.err
 }
 
 // HandleMessage will process the given rpc message. The caller is resposible to
@@ -149,12 +154,19 @@ func (b *BBA) Output() interface{} {
 // processing a protocol message. After calling this method the que will
 // be empty. Hence calling Messages can only occur once in a single roundtrip.
 func (b *BBA) Messages() []*AgreementMessage {
+	b.lock.RLock()
 	msgs := b.messages
+	b.lock.RUnlock()
+
+	b.lock.Lock()
+	defer b.lock.Unlock()
 	b.messages = []*AgreementMessage{}
 	return msgs
 }
 
 func (b *BBA) addMessage(msg *AgreementMessage) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
 	b.messages = append(b.messages, msg)
 }
 
@@ -164,8 +176,7 @@ func (b *BBA) run() {
 	for {
 		select {
 		case t := <-b.inputCh:
-			msg, err := b.inputValue(t.value)
-			t.response <- bbaInputResponse{msg, err}
+			t.err <- b.inputValue(t.value)
 		case t := <-b.messageCh:
 			t.err <- b.handleMessage(t.senderID, t.msg)
 		}
@@ -174,33 +185,39 @@ func (b *BBA) run() {
 
 // inputValue will set the given val as the initial value to be proposed in the
 // Agreement and returns an initial AgreementMessage or an error.
-func (b *BBA) inputValue(val bool) (*AgreementMessage, error) {
+func (b *BBA) inputValue(val bool) error {
 	// Make sure we are in the first epoch round.
 	if b.epoch != 0 || b.estimated != nil {
-		return nil, errors.New(
-			"proposing initial value can only be done in the first epoch")
+		// return errors.New(
+		// 	"proposing initial value can only be done in the first epoch")
+		return nil
 	}
 	b.estimated = val
 	b.sentBvals = append(b.sentBvals, val)
-	b.recvBval[b.pid] = val
-	msg := NewAgreementMessage(int(b.epoch), &BvalRequest{val})
-	return msg, nil
+	b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{val}))
+	return b.handleBvalRequest(b.pid, val)
 }
 
 // handleMessage will process the given rpc message. The caller is resposible to
 // make sure only RPC messages are passed that are elligible for the BBA protocol.
 func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
-	// Make sure we only handle messages that are sent in the same epoch.
-	if msg.Epoch != int(b.epoch) {
+	// Ignore messages from older epochs.
+	if msg.Epoch < int(b.epoch) {
 		log.Debugf(
-			"id (%d) with epoch (%d) received msg from other epoch (%d)",
+			"id (%d) with epoch (%d) received msg from an older epoch (%d)",
 			b.ID, b.epoch, msg.Epoch,
 		)
 		return nil
 	}
-	if b.done {
-		return errors.New("bba instance already terminated")
+	// Messages from later epochs will be qued and processed later.
+	if msg.Epoch > int(b.epoch) {
+		b.delayedMessages = append(b.delayedMessages, delayedMessage{senderID, msg})
+		return nil
 	}
+	if b.done {
+		return fmt.Errorf("bba instance (%d) already terminated", b.ID)
+	}
+
 	switch t := msg.Message.(type) {
 	case *BvalRequest:
 		return b.handleBvalRequest(senderID, t.Value)
@@ -211,8 +228,8 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 	}
 }
 
-// handleBvalRequest processes the received binary value and returns an
-// AgreementOutput.
+// handleBvalRequest processes the received binary value and fills up the
+// message que if there are any messages that need to be broadcasted.
 func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 	b.recvBval[senderID] = val
 	lenBval := b.countBvals(val)
@@ -225,9 +242,8 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 		// Wait until binValues > 0, then broadcast AUX(b). The AUX(b) broadcast
 		// may only occure once per epoch.
 		if wasEmptyBinValues {
-			msg := NewAgreementMessage(int(b.epoch), &AuxRequest{val})
-			b.addMessage(msg)
-			b.recvAux[b.pid] = val
+			b.addMessage(NewAgreementMessage(int(b.epoch), &AuxRequest{val}))
+			b.handleAuxRequest(b.pid, val)
 		}
 		b.tryOutputAgreement()
 		return nil
@@ -236,9 +252,8 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 	// been sent yet broadcast input(b) and handle the input ourselfs.
 	if lenBval == b.F+1 && !b.hasSentBval(val) {
 		b.sentBvals = append(b.sentBvals, val)
-		b.recvBval[b.pid] = val
-		msg := NewAgreementMessage(int(b.epoch), &BvalRequest{val})
-		b.addMessage(msg)
+		b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{val}))
+		return b.handleBvalRequest(b.pid, val)
 	}
 	return nil
 }
@@ -269,6 +284,7 @@ func (b *BBA) tryOutputAgreement() {
 	if b.done || b.decision != nil && b.decision.(bool) == coin {
 		log.Debugf("instance (%d) is done", b.ID)
 		b.done = true
+		return
 	}
 
 	log.Debugf(
@@ -292,8 +308,16 @@ func (b *BBA) tryOutputAgreement() {
 	}
 	estimated := b.estimated.(bool)
 	b.sentBvals = append(b.sentBvals, estimated)
-	msg := NewAgreementMessage(int(b.epoch), &BvalRequest{estimated})
-	b.addMessage(msg)
+	b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{estimated}))
+
+	// handle the delayed messages.
+	for _, que := range b.delayedMessages {
+		if err := b.handleMessage(que.sid, que.msg); err != nil {
+			// TODO: Handle this error properly.
+			log.Warn(err)
+		}
+	}
+	b.delayedMessages = []delayedMessage{}
 }
 
 // advanceEpoch will reset all the values that are bound to an epoch and increments
