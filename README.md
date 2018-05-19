@@ -13,6 +13,9 @@ Uses a common coin to agree that a majority of the participants have a consensus
 #### Asynchronous Common Subset (ACS)
 Combines RBC and BBA to agree on a set of encrypted transactions.
 
+#### HBBFT engine 
+Top level HoneyBadger protocol that implements all the above sub(protocols) into a complete --production grade-- practical consensus engine. 
+
 ### Usage
 Install dependencies
 ```
@@ -27,10 +30,9 @@ make test
 ### Current project state
 - [x] Reliable Broadcast Algorithm
 - [x] Binary Byzantine Agreement
-- [ ] Asynchronous Common Subset 
-- [ ] Practical hbbft engine 
+- [x] Asynchronous Common Subset 
+- [ ] Practical hbbft engine
 
-### References
 - [The Honey Badger BFT protocols](https://eprint.iacr.org/2016/199.pdf)
 - [Practical Byzantine Fault Tolerance](http://pmg.csail.mit.edu/papers/osdi99.pdf)
 - [Treshold encryption](https://en.wikipedia.org/wiki/Threshold_cryptosystem)
