@@ -245,7 +245,6 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 			b.addMessage(NewAgreementMessage(int(b.epoch), &AuxRequest{val}))
 			b.handleAuxRequest(b.pid, val)
 		}
-		b.tryOutputAgreement()
 		return nil
 	}
 	// When receiving input(b) messages from f + 1 nodes, if inputs(b) is not
@@ -260,9 +259,7 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 
 func (b *BBA) handleAuxRequest(senderID uint64, val bool) error {
 	b.recvAux[senderID] = val
-	if len(b.binValues) > 0 {
-		b.tryOutputAgreement()
-	}
+	b.tryOutputAgreement()
 	return nil
 }
 
@@ -270,12 +267,16 @@ func (b *BBA) handleAuxRequest(senderID uint64, val bool) error {
 // once the (N - f) messages are received, make a common coin and uses it to
 // compute the next decision estimate and output the optional decision value.
 func (b *BBA) tryOutputAgreement() {
+	if len(b.binValues) == 0 {
+		return
+	}
 	// Wait longer till eventually receive (N - F) aux messages.
 	lenOutputs, values := b.countOutputs()
 	if lenOutputs < b.N-b.F {
 		return
 	}
 
+	// TODO: implement a real common coin algorithm.
 	coin := b.epoch%2 == 0
 
 	// Continue the BBA until both:
