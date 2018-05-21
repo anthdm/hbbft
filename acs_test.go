@@ -3,28 +3,45 @@ package hbbft
 import (
 	"fmt"
 	"log"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
 
+// Test ACS with 4 good nodes. The result should be that at least the output
+// of (N - f) nodes has been provided.
 func TestACSWithNormalNodes(t *testing.T) {
 	var (
 		resultCh = make(chan map[uint64][]byte)
 		nodes    = makeACSNodes(4, 0, resultCh)
-		done     chan struct{}
+		wg       sync.WaitGroup
 	)
+
+	inputs := map[int][]byte{
+		0: []byte("AAAAAA"),
+		1: []byte("BBBBBB"),
+		2: []byte("CCCCCC"),
+		3: []byte("DDDDDD"),
+	}
+
+	wg.Add(len(nodes))
 	go func() {
 		for {
 			res := <-resultCh
-			_ = res
+			assert.Equal(t, len(nodes)-1, len(res))
+			for id, result := range res {
+				assert.Equal(t, inputs[int(id)], result)
+			}
+			wg.Done()
 		}
 	}()
-	assert.Nil(t, nodes[0].inputValue([]byte("aaaaaaaaaa")))
-	assert.Nil(t, nodes[1].inputValue([]byte("bbbbbbbbbb")))
-	assert.Nil(t, nodes[2].inputValue([]byte("cccccccccc")))
-	assert.Nil(t, nodes[3].inputValue([]byte("dddddddddd")))
-	<-done
+
+	for nodeID, value := range inputs {
+		assert.Nil(t, nodes[nodeID].inputValue(value))
+	}
+	wg.Wait()
 }
 
 func TestNewACS(t *testing.T) {
@@ -94,7 +111,7 @@ func (n *testACSNode) run() {
 			}
 			if output := n.acs.Output(); output != nil {
 				n.resultCh <- output
-				// log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
+				log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
 			}
 			for _, msg := range n.acs.Messages() {
 				go n.transport.Broadcast(n.acs.ID, msg)
@@ -116,6 +133,7 @@ func (n *testACSNode) inputValue(value []byte) error {
 	for _, msg := range msgs {
 		go n.transport.Broadcast(n.acs.ID, msg)
 	}
+	time.Sleep(10 * time.Millisecond)
 	return nil
 }
 

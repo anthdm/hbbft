@@ -80,6 +80,9 @@ type (
 // NewACS returns a new ACS instance configured with the given Config and node
 // ids.
 func NewACS(cfg Config, nodes []uint64) *ACS {
+	if cfg.F == 0 {
+		cfg.F = (cfg.N - 1) / 3
+	}
 	acs := &ACS{
 		Config:       cfg,
 		rbcInstances: make(map[uint64]*RBC),
@@ -93,7 +96,7 @@ func NewACS(cfg Config, nodes []uint64) *ACS {
 	// Create all the instances for the participating nodes
 	for _, id := range nodes {
 		acs.rbcInstances[id] = NewRBC(cfg, id)
-		acs.bbaInstances[id] = NewBBA(cfg, id)
+		acs.bbaInstances[id] = NewBBA(cfg, cfg.ID)
 	}
 	go acs.run()
 	return acs
@@ -174,7 +177,15 @@ func (a *ACS) inputValue(data []byte) ([]*BroadcastMessage, []*ACSMessage, error
 	for _, msg := range rbc.Messages() {
 		a.addMessage(a.ID, msg)
 	}
-	a.tryCompleteAgreement()
+	if output := rbc.Output(); output != nil {
+		a.rbcResults[a.ID] = output
+		a.processAgreement(a.ID, func(bba *BBA) error {
+			if bba.AcceptInput() {
+				return bba.InputValue(true)
+			}
+			return nil
+		})
+	}
 	return reqs, a.Messages(), nil
 }
 
@@ -193,87 +204,78 @@ func (a *ACS) run() {
 // handleAgreement processes the received AgreementMessage from sender (sid)
 // for a value proposed by the proposing node (pid).
 func (a *ACS) handleAgreement(sid, pid uint64, msg *AgreementMessage) error {
-	bba, ok := a.bbaInstances[pid]
-	if !ok {
-		return fmt.Errorf("could not find bba instance for (%d)", pid)
-	}
-	if err := bba.HandleMessage(sid, msg); err != nil {
-		return err
-	}
-	for _, msg := range bba.Messages() {
-		a.addMessage(pid, msg)
-	}
-	// If we have an agreement output.
-	if output := bba.Output(); output != nil {
-		if err := a.handleAgreementOutput(pid, output.(bool)); err != nil {
-			return err
-		}
-	}
-	a.tryCompleteAgreement()
-	return nil
-}
-
-// When a bba has produced an output it will get evaluated and processed here.
-func (a *ACS) handleAgreementOutput(pid uint64, val bool) error {
-	a.bbaResults[pid] = val
-	if !val || a.countTruthyAgreements() < a.N-a.F {
-		return nil
-	}
-	// When received 1 from at least (N - f) instances of BA, provide input 0.
-	// to each other instance of BBA that has not provided his input yet.
-	for _, bba := range a.bbaInstances {
-		if bba.AcceptInput() {
-			if err := bba.InputValue(false); err != nil {
-				return err
-			}
-			for _, msg := range bba.Messages() {
-				a.addMessage(a.ID, msg)
-			}
-		}
-	}
-	return nil
+	return a.processAgreement(pid, func(bba *BBA) error {
+		return bba.HandleMessage(sid, msg)
+	})
 }
 
 // handleBroadcast processes the received BroadcastMessage.
 func (a *ACS) handleBroadcast(sid, pid uint64, msg *BroadcastMessage) error {
+	return a.processBroadcast(pid, func(rbc *RBC) error {
+		return rbc.HandleMessage(sid, msg)
+	})
+}
+
+func (a *ACS) processBroadcast(pid uint64, fun func(rbc *RBC) error) error {
 	rbc, ok := a.rbcInstances[pid]
 	if !ok {
 		return fmt.Errorf("could not find rbc instance for (%d)", pid)
 	}
-	if err := rbc.HandleMessage(sid, msg); err != nil {
+	if err := fun(rbc); err != nil {
 		return err
 	}
 	for _, msg := range rbc.Messages() {
 		a.addMessage(pid, msg)
 	}
-	// If we got a broadcast output, set the result and handle that the output
-	// is received for the proposing node pid.
 	if output := rbc.Output(); output != nil {
 		log.Debugf("(%d) rbc instance has produced an output (%v)", pid, output)
 		a.rbcResults[pid] = output
-		if err := a.handleBroadcastOutput(pid); err != nil {
+		return a.processAgreement(pid, func(bba *BBA) error {
+			if bba.AcceptInput() {
+				return bba.InputValue(true)
+			}
 			return nil
-		}
+		})
 	}
 	return nil
 }
 
-// When value (v_i) is delivered from from (RBC_i) and the input is not been
-// provided to (BA_i) we provide 1 to (BA_i).
-func (a *ACS) handleBroadcastOutput(pid uint64) error {
+func (a *ACS) processAgreement(pid uint64, fun func(bba *BBA) error) error {
 	bba, ok := a.bbaInstances[pid]
 	if !ok {
 		return fmt.Errorf("could not find bba instance for (%d)", pid)
 	}
-	if bba.AcceptInput() {
-		if err := bba.InputValue(true); err != nil {
-			return err
-		}
-		for _, msg := range bba.Messages() {
-			a.addMessage(pid, msg)
-		}
+	if bba.done {
+		return nil
 	}
-	a.tryCompleteAgreement()
+	if err := fun(bba); err != nil {
+		return err
+	}
+	for _, msg := range bba.Messages() {
+		a.addMessage(pid, msg)
+	}
+	// Check if we got an output.
+	if output := bba.Output(); output != nil {
+		a.bbaResults[pid] = output.(bool)
+		// When received 1 from at least (N - f) instances of BA, provide input 0.
+		// to each other instance of BBA that has not provided his input yet.
+		if output.(bool) && a.countTruthyAgreements() == a.N-a.F {
+			for id, bba := range a.bbaInstances {
+				if bba.AcceptInput() {
+					if err := bba.InputValue(false); err != nil {
+						return err
+					}
+					for _, msg := range bba.Messages() {
+						a.addMessage(id, msg)
+					}
+					if output := bba.Output(); output != nil {
+						a.bbaResults[id] = output.(bool)
+					}
+				}
+			}
+		}
+		a.tryCompleteAgreement()
+	}
 	return nil
 }
 
