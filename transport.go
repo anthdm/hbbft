@@ -3,6 +3,7 @@ package hbbft
 // RPC holds the payload send between participants in the consensus.
 type RPC struct {
 	// NodeID is the unique identifier of the sending node.
+	// TODO: consider renaming this to SenderID.
 	NodeID uint64
 	// Payload beeing send.
 	Payload interface{}
@@ -21,9 +22,12 @@ type Transport interface {
 	// Broadcast multicasts the given messages to all connected nodes.
 	Broadcast(from uint64, msg interface{}) error
 
-	// Connect is used to connect this tranport to another transport.
-	Connect(string, Transport)
+	SendMessage(from, to uint64, msg interface{}) error
 
-	// Addr returns the address of the transport.
-	Addr() string
+	// Connect is used to connect this tranport to another transport.
+	Connect(uint64, Transport)
+
+	// Addr returns the address of the transport. We address transport by the
+	// id of the node.
+	Addr() uint64
 }

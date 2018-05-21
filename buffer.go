@@ -1,6 +1,10 @@
 package hbbft
 
-import "math/rand"
+import (
+	"bytes"
+	"math/rand"
+	"time"
+)
 
 // buffer holds an uncommited pool of arbitrary data. In blockchain parlance
 // this would be the unbound transaction list.
@@ -18,6 +22,26 @@ func newBuffer() *buffer {
 // push pushes v to the buffer.
 func (b *buffer) push(tx Transaction) {
 	b.data = append(b.data, tx)
+}
+
+// @optimize: This can be much more efficient.
+// delete removes the given slice of Transactions from the buffer.
+func (b *buffer) delete(txx []Transaction) {
+	for i := 0; i < len(b.data); i++ {
+		if isInTxList(b.data[i], txx) {
+			b.data = append(b.data[:i], b.data[i+1:]...)
+			i--
+		}
+	}
+}
+
+func isInTxList(tx Transaction, txx []Transaction) bool {
+	for i := 0; i < len(txx); i++ {
+		if bytes.Compare(tx.Hash(), txx[i].Hash()) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // len return the current length of the buffer.
@@ -46,7 +70,16 @@ func (b *buffer) sample(n, m int) []Transaction {
 		}
 		index := rand.Intn(m)
 		txx = append(txx, b.data[index])
-		b.data = append(b.data[:index], b.data[index+1:]...)
 	}
 	return txx
 }
+
+func sample(txx []Transaction, n int) []Transaction {
+	s := []Transaction{}
+	for i := 0; i < n; i++ {
+		s = append(s, txx[rand.Intn(len(txx))])
+	}
+	return s
+}
+
+func init() { rand.Seed(time.Now().UnixNano()) }

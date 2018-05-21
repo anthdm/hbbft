@@ -10,14 +10,6 @@ import (
 	"github.com/klauspost/reedsolomon"
 )
 
-// Config holds hyperparameters used in each (sub)protocol.
-type Config struct {
-	// Unique id of the node
-	ID uint64
-	// Number of nodes and number of tolerate faulty nodes.
-	N, F int
-}
-
 // BroadcastMessage holds the payload sent between nodes in the rbc protocol.
 // Its basically just a wrapper to let top-level protocols distinguish incoming
 // messages.

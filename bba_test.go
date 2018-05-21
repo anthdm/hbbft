@@ -257,4 +257,4 @@ func (n *testBBANode) run() {
 	}
 }
 
-// func init() { logrus.SetLevel(logrus.DebugLevel) }
+//func init() { logrus.SetLevel(logrus.DebugLevel) }

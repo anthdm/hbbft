@@ -2,7 +2,6 @@ package hbbft
 
 import (
 	"fmt"
-	"sync"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -45,11 +44,9 @@ type ACS struct {
 	bbaResults map[uint64]bool
 	// Final output of the ACS.
 	output map[uint64][]byte
-
-	lock sync.RWMutex
 	// Que of ACSMessages that need to be broadcasted after each received
 	// and processed a message.
-	messages []*ACSMessage
+	messageQue *messageQue
 
 	// control flow tuples for internal channel communication.
 	inputCh   chan acsInputTuple
@@ -79,7 +76,7 @@ type (
 
 // NewACS returns a new ACS instance configured with the given Config and node
 // ids.
-func NewACS(cfg Config, nodes []uint64) *ACS {
+func NewACS(cfg Config) *ACS {
 	if cfg.F == 0 {
 		cfg.F = (cfg.N - 1) / 3
 	}
@@ -89,12 +86,12 @@ func NewACS(cfg Config, nodes []uint64) *ACS {
 		bbaInstances: make(map[uint64]*BBA),
 		rbcResults:   make(map[uint64][]byte),
 		bbaResults:   make(map[uint64]bool),
-		messages:     []*ACSMessage{},
+		messageQue:   newMessageQue(),
 		inputCh:      make(chan acsInputTuple),
 		messageCh:    make(chan acsMessageTuple),
 	}
 	// Create all the instances for the participating nodes
-	for _, id := range nodes {
+	for _, id := range cfg.Nodes {
 		acs.rbcInstances[id] = NewRBC(cfg, id)
 		acs.bbaInstances[id] = NewBBA(cfg, cfg.ID)
 	}
@@ -104,14 +101,14 @@ func NewACS(cfg Config, nodes []uint64) *ACS {
 
 // InputValue sets the input value for broadcast and returns an initial set of
 // Broadcast and ACS Messages to be broadcasted in the network.
-func (a *ACS) InputValue(val []byte) ([]*BroadcastMessage, []*ACSMessage, error) {
+func (a *ACS) InputValue(val []byte) error {
 	t := acsInputTuple{
 		value:    val,
 		response: make(chan acsInputResponse),
 	}
 	a.inputCh <- t
 	resp := <-t.response
-	return resp.rbcMessages, resp.acsMessages, resp.err
+	return resp.err
 }
 
 // HandleMessage handles incoming messages to ACS and redirects them to the
@@ -139,18 +136,6 @@ func (a *ACS) handleMessage(senderID uint64, msg *ACSMessage) error {
 	}
 }
 
-// Messages returns the internal message que and set it back to empty.
-func (a *ACS) Messages() []*ACSMessage {
-	a.lock.RLock()
-	msgs := a.messages
-	a.lock.RUnlock()
-
-	a.lock.Lock()
-	defer a.lock.Unlock()
-	a.messages = []*ACSMessage{}
-	return msgs
-}
-
 // Output will return the output of the ACS instance. If the output was not nil
 // then it will return the output else nil. Note that after consuming the output
 // its will be set to nil forever.
@@ -165,14 +150,20 @@ func (a *ACS) Output() map[uint64][]byte {
 
 // inputValue sets the input value for broadcast and returns an initial set of
 // Broadcast and ACS Messages to be broadcasted in the network.
-func (a *ACS) inputValue(data []byte) ([]*BroadcastMessage, []*ACSMessage, error) {
+func (a *ACS) inputValue(data []byte) error {
 	rbc, ok := a.rbcInstances[a.ID]
 	if !ok {
-		return nil, nil, fmt.Errorf("could not find rbc instance (%d)", a.ID)
+		return fmt.Errorf("could not find rbc instance (%d)", a.ID)
 	}
 	reqs, err := rbc.InputValue(data)
 	if err != nil {
-		return nil, nil, err
+		return err
+	}
+	if len(reqs) != a.N-1 {
+		return fmt.Errorf("expecting (%d) proof messages got (%d)", a.N, len(reqs))
+	}
+	for i, id := range uint64sWithout(a.Nodes, a.ID) {
+		a.messageQue.addMessage(&ACSMessage{a.ID, reqs[i]}, id)
 	}
 	for _, msg := range rbc.Messages() {
 		a.addMessage(a.ID, msg)
@@ -186,15 +177,15 @@ func (a *ACS) inputValue(data []byte) ([]*BroadcastMessage, []*ACSMessage, error
 			return nil
 		})
 	}
-	return reqs, a.Messages(), nil
+	return nil
 }
 
 func (a *ACS) run() {
 	for {
 		select {
 		case t := <-a.inputCh:
-			bmsg, amsg, err := a.inputValue(t.value)
-			t.response <- acsInputResponse{bmsg, amsg, err}
+			err := a.inputValue(t.value)
+			t.response <- acsInputResponse{err: err}
 		case t := <-a.messageCh:
 			t.err <- a.handleMessage(t.senderID, t.msg)
 		}
@@ -300,11 +291,10 @@ func (a *ACS) tryCompleteAgreement() {
 	}
 }
 
-// addMessage adds the given messages as ACSMessage to the message que.
 func (a *ACS) addMessage(from uint64, msg interface{}) {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-	a.messages = append(a.messages, &ACSMessage{from, msg})
+	for _, id := range uint64sWithout(a.Nodes, a.ID) {
+		a.messageQue.addMessage(&ACSMessage{from, msg}, id)
+	}
 }
 
 // countTruthyAgreements returns the number of truthy received agreement messages.
@@ -316,4 +306,14 @@ func (a *ACS) countTruthyAgreements() int {
 		}
 	}
 	return n
+}
+
+func uint64sWithout(s []uint64, val uint64) []uint64 {
+	dest := []uint64{}
+	for i := 0; i < len(s); i++ {
+		if s[i] != val {
+			dest = append(dest, s[i])
+		}
+	}
+	return dest
 }
