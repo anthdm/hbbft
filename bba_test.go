@@ -6,13 +6,72 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
+// Testing BBA should cover all of the following specifications.
+//
+// 1. If a correct node outputs the value (b), then every good node outputs (b).
+// 2. If all good nodes receive input, then every good node outputs a value.
+// 3. If any good node ouputs value (b), then at least one good ndoe receives (b)
+// as input.
+
+// Test BBA with 2 false and 2 true nodes, cause binary agreement is not a
+// majority vote it guarantees that all good nodes output a least the output of
+// one good node. Hence the output should be true for all the nodes.
+func TestAgreementWith2FalseNodes(t *testing.T) {
+	var (
+		pid      = 0
+		nNodes   = 4
+		resultCh = make(chan bool)
+		nodes    = makeBBANodes(nNodes, pid, resultCh)
+		wg       sync.WaitGroup
+	)
+	wg.Add(nNodes)
+	go func() {
+		// Expect all nodes to output true.
+		for res := range resultCh {
+			t.Log(res)
+			assert.True(t, res)
+			wg.Done()
+		}
+	}()
+	assert.Nil(t, nodes[0].inputValue(false))
+	assert.Nil(t, nodes[1].inputValue(true))
+	assert.Nil(t, nodes[2].inputValue(true))
+	assert.Nil(t, nodes[3].inputValue(false))
+	wg.Wait()
+}
+
+// Test BBA where most of the nodes input false, which should result in false
+// output for all the good nodes.
+func TestAgreementWithFalseNodes(t *testing.T) {
+	var (
+		pid      = 0
+		nNodes   = 4
+		resultCh = make(chan bool)
+		nodes    = makeBBANodes(nNodes, pid, resultCh)
+		wg       sync.WaitGroup
+	)
+	wg.Add(nNodes)
+	go func() {
+		// Expect all nodes to output true.
+		for res := range resultCh {
+			t.Log(res)
+			assert.False(t, res)
+			wg.Done()
+		}
+	}()
+	assert.Nil(t, nodes[0].inputValue(false))
+	assert.Nil(t, nodes[1].inputValue(false))
+	assert.Nil(t, nodes[2].inputValue(true))
+	assert.Nil(t, nodes[3].inputValue(false))
+	wg.Wait()
+}
+
 // Test a round of BBA where 1 of the nodes has not completed the broadcast
 // yet and hence get false as input.
-func TestAgreementWithLateNode(t *testing.T) {
+func TestAgreementOneFalseNode(t *testing.T) {
 	var (
 		pid      = 0
 		nNodes   = 4
@@ -32,6 +91,33 @@ func TestAgreementWithLateNode(t *testing.T) {
 	assert.Nil(t, nodes[1].inputValue(true))
 	assert.Nil(t, nodes[2].inputValue(true))
 	assert.Nil(t, nodes[3].inputValue(false))
+	wg.Wait()
+}
+
+// Test a round of BBA where all nodes have completed the broadcast and hence
+// input all true.
+func TestAgreementAllGoodNodes(t *testing.T) {
+	var (
+		pid      = 0
+		nNodes   = 4
+		resultCh = make(chan bool)
+		nodes    = makeBBANodes(nNodes, pid, resultCh)
+		wg       sync.WaitGroup
+	)
+	wg.Add(nNodes)
+	go func() {
+		// Expect all nodes to output true.
+		for {
+			res := <-resultCh
+			assert.True(t, res)
+			wg.Done()
+		}
+	}()
+	// Let all nodes input true.
+	assert.Nil(t, nodes[0].inputValue(true))
+	assert.Nil(t, nodes[1].inputValue(true))
+	assert.Nil(t, nodes[2].inputValue(true))
+	assert.Nil(t, nodes[3].inputValue(true))
 	wg.Wait()
 }
 
@@ -74,33 +160,6 @@ func TestBBAStepByStep(t *testing.T) {
 	assert.Equal(t, true, bba.output.(bool))
 	assert.Equal(t, true, bba.decision.(bool))
 	assert.Equal(t, uint32(1), bba.epoch)
-}
-
-// Test a round of BBA where all nodes have completed the broadcast and hence
-// input all true.
-func TestAgreementAllGoodNodes(t *testing.T) {
-	var (
-		pid      = 0
-		nNodes   = 4
-		resultCh = make(chan bool)
-		nodes    = makeBBANodes(nNodes, pid, resultCh)
-		wg       sync.WaitGroup
-	)
-	wg.Add(nNodes)
-	go func() {
-		// Expect all nodes to output true.
-		for {
-			res := <-resultCh
-			assert.True(t, res)
-			wg.Done()
-		}
-	}()
-	// Let all nodes input true.
-	assert.Nil(t, nodes[0].inputValue(true))
-	assert.Nil(t, nodes[1].inputValue(true))
-	assert.Nil(t, nodes[2].inputValue(true))
-	assert.Nil(t, nodes[3].inputValue(true))
-	wg.Wait()
 }
 
 func TestNewBBA(t *testing.T) {
@@ -198,4 +257,4 @@ func (n *testBBANode) run() {
 	}
 }
 
-func init() { logrus.SetLevel(logrus.DebugLevel) }
+// func init() { logrus.SetLevel(logrus.DebugLevel) }

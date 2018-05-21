@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// Test ACS with 4 good nodes. The result should be that all the nodes agree
-// on eachother's input.
+// Test ACS with 4 good nodes. The result should be that at least the output
+// of (N - f) nodes has been provided.
 func TestACSWithNormalNodes(t *testing.T) {
 	var (
 		resultCh = make(chan map[uint64][]byte)
@@ -30,8 +30,9 @@ func TestACSWithNormalNodes(t *testing.T) {
 	go func() {
 		for {
 			res := <-resultCh
-			for id, input := range inputs {
-				assert.Equal(t, res[uint64(id)], input)
+			assert.Equal(t, len(nodes)-1, len(res))
+			for id, result := range res {
+				assert.Equal(t, inputs[int(id)], result)
 			}
 			wg.Done()
 		}

@@ -80,6 +80,9 @@ type (
 // NewACS returns a new ACS instance configured with the given Config and node
 // ids.
 func NewACS(cfg Config, nodes []uint64) *ACS {
+	if cfg.F == 0 {
+		cfg.F = (cfg.N - 1) / 3
+	}
 	acs := &ACS{
 		Config:       cfg,
 		rbcInstances: make(map[uint64]*RBC),
@@ -93,7 +96,7 @@ func NewACS(cfg Config, nodes []uint64) *ACS {
 	// Create all the instances for the participating nodes
 	for _, id := range nodes {
 		acs.rbcInstances[id] = NewRBC(cfg, id)
-		acs.bbaInstances[id] = NewBBA(cfg, id)
+		acs.bbaInstances[id] = NewBBA(cfg, cfg.ID)
 	}
 	go acs.run()
 	return acs

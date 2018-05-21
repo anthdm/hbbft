@@ -283,14 +283,14 @@ func (b *BBA) tryOutputAgreement() {
 	// - a value b is output in some epoch r
 	// - the value (coin r) = b for some round r' > r
 	if b.done || b.decision != nil && b.decision.(bool) == coin {
-		log.Debugf("instance (%d) is done", b.ID)
+		log.Debugf("instance (%d) is done", b.pid)
 		b.done = true
 		return
 	}
 
 	log.Debugf(
 		"id (%d) is advancing to the next epoch! (%d) received (%d) aux messages",
-		b.ID, b.epoch+1, lenOutputs,
+		b.pid, b.epoch+1, lenOutputs,
 	)
 
 	// Start the next epoch.
