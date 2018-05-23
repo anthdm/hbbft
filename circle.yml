@@ -1,13 +1,19 @@
 version: 2
 jobs:
   build:
+<<<<<<< HEAD
+=======
     working_directory: /go/src/github.com/anthdm/hbbft
+>>>>>>> ac749f3f89a8e628b8aeeb34cb76527428400b00
     docker:
-      - image: vidsyhq/go-builder:latest
-        environment:
-          BUILD: false
+      - image: circleci/golang:1.9
+    working_directory: /go/src/github.com/anthdm/hbbft
     steps:
       - checkout
+<<<<<<< HEAD
+      - run: go get -v -t -d ./...
+      - run: go test -v ./...
+=======
       - restore_cache:
           key: "dependency-cache-vendor-{{ checksum \"Gopkg.lock\" }}"
       - run: /scripts/build.sh
@@ -44,3 +50,4 @@ workflows:
             only: /[0-9]+\.[0-9]+\.[0-9]+/
           branches:
             ignore: master
+>>>>>>> ac749f3f89a8e628b8aeeb34cb76527428400b00
