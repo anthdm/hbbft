@@ -66,7 +66,29 @@ type RBC struct {
 	echoSent, readySent, outputDecoded bool
 	// The actual output this instance has produced.
 	output []byte
+
+	// control flow tuples for internal channel communication.
+	inputCh   chan rbcInputTuple
+	messageCh chan rbcMessageTuple
 }
+
+type (
+	rbcMessageTuple struct {
+		senderID uint64
+		msg      *BroadcastMessage
+		err      chan error
+	}
+
+	rbcInputResponse struct {
+		messages []*BroadcastMessage
+		err      error
+	}
+
+	rbcInputTuple struct {
+		value    []byte
+		response chan rbcInputResponse
+	}
+)
 
 // NewRBC returns a new instance of the ReliableBroadcast configured
 // with the given config
@@ -82,7 +104,7 @@ func NewRBC(cfg Config, proposerID uint64) *RBC {
 	if err != nil {
 		panic(err)
 	}
-	return &RBC{
+	rbc := &RBC{
 		Config:          cfg,
 		recvEchos:       make(map[uint64]*EchoRequest),
 		recvReadys:      make(map[uint64][]byte),
@@ -91,7 +113,11 @@ func NewRBC(cfg Config, proposerID uint64) *RBC {
 		numDataShards:   dataShards,
 		messages:        []*BroadcastMessage{},
 		proposerID:      proposerID,
+		inputCh:         make(chan rbcInputTuple),
+		messageCh:       make(chan rbcMessageTuple),
 	}
+	go rbc.run()
+	return rbc
 }
 
 // InputValue will set the given data as value V. The data will first splitted
@@ -99,6 +125,44 @@ func NewRBC(cfg Config, proposerID uint64) *RBC {
 // equally splitted shards will be fed into a reedsolomon encoder. After encoding,
 // only the requests for the other participants are beeing returned.
 func (r *RBC) InputValue(data []byte) ([]*BroadcastMessage, error) {
+	t := rbcInputTuple{
+		value:    data,
+		response: make(chan rbcInputResponse),
+	}
+	r.inputCh <- t
+	resp := <-t.response
+	return resp.messages, resp.err
+}
+
+// HandleMessage will process the given rpc message and will return a possible
+// outcome. The caller is resposible to make sure only RPC messages are passed
+// that are elligible for the RBC protocol.
+func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
+	t := rbcMessageTuple{
+		senderID: senderID,
+		msg:      msg,
+		err:      make(chan error),
+	}
+	r.messageCh <- t
+	return <-t.err
+}
+
+func (r *RBC) run() {
+	for {
+		select {
+		case t := <-r.inputCh:
+			msgs, err := r.inputValue(t.value)
+			t.response <- rbcInputResponse{
+				messages: msgs,
+				err:      err,
+			}
+		case t := <-r.messageCh:
+			t.err <- r.handleMessage(t.senderID, t.msg)
+		}
+	}
+}
+
+func (r *RBC) inputValue(data []byte) ([]*BroadcastMessage, error) {
 	shards, err := makeShards(r.enc, data)
 	if err != nil {
 		return nil, err
@@ -116,10 +180,7 @@ func (r *RBC) InputValue(data []byte) ([]*BroadcastMessage, error) {
 	return reqs[1:], nil
 }
 
-// HandleMessage will process the given rpc message and will return a possible
-// outcome. The caller is resposible to make sure only RPC messages are passed
-// that are elligible for the RBC protocol.
-func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
+func (r *RBC) handleMessage(senderID uint64, msg *BroadcastMessage) error {
 	switch t := msg.Payload.(type) {
 	case *ProofRequest:
 		return r.handleProofRequest(senderID, t)

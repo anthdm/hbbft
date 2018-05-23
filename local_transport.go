@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-var latency = 4 * time.Millisecond
+var latency = 0 * time.Millisecond
 
 // LocalTransport implements a local Transport. This is used to test hbbft
 // without going over the network.

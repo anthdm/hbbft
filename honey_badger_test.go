@@ -47,7 +47,7 @@ func (n *testNode) run() {
 					continue
 				}
 				for _, msg := range n.hb.messageQue.messages() {
-					n.transport.SendMessage(n.hb.ID, msg.to, msg.payload)
+					n.transport.SendMessage(n.hb.ID, msg.To, msg.Payload)
 				}
 			}
 		}
@@ -59,7 +59,7 @@ func (n *testNode) propose() error {
 		return err
 	}
 	for _, msg := range n.hb.messageQue.messages() {
-		n.transport.SendMessage(n.hb.ID, msg.to, msg.payload)
+		n.transport.SendMessage(n.hb.ID, msg.To, msg.Payload)
 	}
 	return nil
 }

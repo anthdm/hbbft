@@ -106,7 +106,7 @@ func (n *testACSNode) run() {
 				log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
 			}
 			for _, msg := range n.acs.messageQue.messages() {
-				go n.transport.SendMessage(n.acs.ID, msg.to, msg.payload)
+				go n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
 			}
 		}
 	}
@@ -117,9 +117,8 @@ func (n *testACSNode) inputValue(value []byte) error {
 		return err
 	}
 	for _, msg := range n.acs.messageQue.messages() {
-		go n.transport.SendMessage(n.acs.ID, msg.to, msg.payload)
+		go n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
 	}
-	// time.Sleep(10 * time.Millisecond)
 	return nil
 }
 
