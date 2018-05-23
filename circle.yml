@@ -31,16 +31,16 @@ workflows:
   build_test:
     jobs:
       - build:
-      filters:
-        tags:
-          only: /[0-9]+\.[0-9]+\.[0-9]+/
-        branches:
-          ignore: master
-      - test:
-        requires:
-          - build
         filters:
           tags:
             only: /[0-9]+\.[0-9]+\.[0-9]+/
           branches:
             ignore: master
+        - test:
+          requires:
+            - build
+          filters:
+            tags:
+              only: /[0-9]+\.[0-9]+\.[0-9]+/
+            branches:
+              ignore: master
