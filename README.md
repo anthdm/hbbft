@@ -14,7 +14,7 @@ Practical implementation of the Honey Badger Byzantine Fault Tolerance consensus
 </p>
 
 ### Summary
-This package includes the building blocks for implementing a practical version of the hbbft protocol. The exposed engine can be plugged easily into existing applications. For implementation details take a look at the simulations which implements hbbft into a realistic scenario. The building blocks of hbbft exist out of the following sub-protocols: 
+This package includes the building blocks for implementing a practical version of the hbbft protocol. The exposed engine can be plugged easily into existing applications. Users can choose to use the transport layer or roll their own. For implementation details take a look at the simulations which implements hbbft into a realistic scenario. The building blocks of hbbft exist out of the following sub-protocols: 
 
 #### Reliable broadcast (RBC)
 Uses reedsolomon erasure encoding to disseminate an ecrypted set of transactions.
