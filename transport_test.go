@@ -1,7 +1,6 @@
 package hbbft
 
 import (
-	"fmt"
 	"sync"
 	"testing"
 
@@ -16,11 +15,11 @@ func TestSendProofMessages(t *testing.T) {
 	)
 	for i := 0; i < len(reqs); i++ {
 		reqs[i] = &BroadcastMessage{&ProofRequest{Index: i}}
-		transports[i] = NewLocalTransport(fmt.Sprintf("%d", i))
+		transports[i] = NewLocalTransport(uint64(i))
 		chans[i] = transports[i].Consume()
 	}
 	// create a new transport that will do the request.
-	sendingTrans := NewLocalTransport("A")
+	sendingTrans := NewLocalTransport(9849)
 	transports = append(transports, sendingTrans)
 	connectTransports(transports)
 
@@ -59,11 +58,11 @@ func TestBroadcast(t *testing.T) {
 		value      = []byte("foobar")
 	)
 	for i := 0; i < len(transports); i++ {
-		transports[i] = NewLocalTransport(fmt.Sprintf("%d", i))
+		transports[i] = NewLocalTransport(uint64(i))
 		chans[i] = transports[i].Consume()
 	}
 	// create a new transport that will do the request.
-	sendingTrans := NewLocalTransport("A")
+	sendingTrans := NewLocalTransport(98499)
 	transports = append(transports, sendingTrans)
 	connectTransports(transports)
 

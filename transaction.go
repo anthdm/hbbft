@@ -7,4 +7,6 @@ import "io"
 // applications.
 type Transaction interface {
 	Encode(io.Writer) error
+	Decode(io.Reader) error
+	Hash() []byte
 }

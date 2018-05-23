@@ -1,11 +1,9 @@
 package hbbft
 
 import (
-	"fmt"
 	"log"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -30,7 +28,7 @@ func TestACSWithNormalNodes(t *testing.T) {
 	go func() {
 		for {
 			res := <-resultCh
-			assert.Equal(t, len(nodes)-1, len(res))
+			assert.Equal(t, len(nodes), len(res))
 			for id, result := range res {
 				assert.Equal(t, inputs[int(id)], result)
 			}
@@ -49,9 +47,10 @@ func TestNewACS(t *testing.T) {
 		id    = uint64(0)
 		nodes = []uint64{0, 1, 2, 3}
 		acs   = NewACS(Config{
-			N:  len(nodes),
-			ID: id,
-		}, nodes)
+			N:     len(nodes),
+			ID:    id,
+			Nodes: nodes,
+		})
 	)
 	assert.Equal(t, len(nodes), len(acs.bbaInstances))
 	assert.Equal(t, len(nodes), len(acs.rbcInstances))
@@ -68,20 +67,13 @@ func TestNewACS(t *testing.T) {
 }
 
 func TestACSOutputIsNilAfterConsuming(t *testing.T) {
-	acs := NewACS(Config{N: 4}, []uint64{1})
+	acs := NewACS(Config{N: 4})
 	output := map[uint64][]byte{
 		1: []byte("this is it"),
 	}
 	acs.output = output
 	assert.Equal(t, output, acs.Output())
 	assert.Nil(t, acs.Output())
-}
-
-func TestACSMessagesIsEmptyAfterConsuming(t *testing.T) {
-	acs := NewACS(Config{N: 4}, []uint64{1})
-	acs.messages = []*ACSMessage{&ACSMessage{}}
-	assert.Equal(t, 1, len(acs.Messages()))
-	assert.Equal(t, 0, len(acs.Messages()))
 }
 
 type testACSNode struct {
@@ -113,27 +105,21 @@ func (n *testACSNode) run() {
 				n.resultCh <- output
 				log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
 			}
-			for _, msg := range n.acs.Messages() {
-				go n.transport.Broadcast(n.acs.ID, msg)
+			for _, msg := range n.acs.messageQue.messages() {
+				go n.transport.SendMessage(n.acs.ID, msg.to, msg.payload)
 			}
 		}
 	}
 }
 
 func (n *testACSNode) inputValue(value []byte) error {
-	reqs, msgs, err := n.acs.InputValue(value)
-	if err != nil {
+	if err := n.acs.InputValue(value); err != nil {
 		return err
 	}
-	mm := make([]interface{}, len(reqs))
-	for i := 0; i < len(reqs); i++ {
-		mm[i] = &ACSMessage{n.acs.ID, reqs[i]}
+	for _, msg := range n.acs.messageQue.messages() {
+		go n.transport.SendMessage(n.acs.ID, msg.to, msg.payload)
 	}
-	go n.transport.SendProofMessages(n.acs.ID, mm)
-	for _, msg := range msgs {
-		go n.transport.Broadcast(n.acs.ID, msg)
-	}
-	time.Sleep(10 * time.Millisecond)
+	// time.Sleep(10 * time.Millisecond)
 	return nil
 }
 
@@ -146,10 +132,11 @@ func makeACSNodes(n, pid int, resultCh chan map[uint64][]byte) []*testACSNode {
 	connectTransports(transports)
 	for i := 0; i < len(nodes); i++ {
 		cfg := Config{
-			N:  len(nodes),
-			ID: uint64(i),
+			N:     len(nodes),
+			ID:    uint64(i),
+			Nodes: ids,
 		}
-		nodes[i] = newTestACSNode(NewACS(cfg, ids), transports[i], resultCh)
+		nodes[i] = newTestACSNode(NewACS(cfg), transports[i], resultCh)
 		go nodes[i].run()
 	}
 	return nodes
@@ -167,7 +154,7 @@ func makeids(n int) []uint64 {
 func makeTransports(n int) []Transport {
 	transports := make([]Transport, n)
 	for i := 0; i < n; i++ {
-		transports[i] = NewLocalTransport(fmt.Sprintf("tr_%d", i))
+		transports[i] = NewLocalTransport(uint64(i))
 	}
 	return transports
 }
