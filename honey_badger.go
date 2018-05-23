@@ -39,7 +39,7 @@ type HoneyBadger struct {
 	txBuffer *buffer
 	// current epoch.
 	epoch uint64
-	// Outputs ACS has produced in the corresponding epochs.
+	// Transactions that are commited in the corresponding epochs.
 	outputs map[uint64][]Transaction
 	// Que of messages that need to be broadcast after processing a message.
 	messageQue *messageQue
@@ -56,6 +56,12 @@ func NewHoneyBadger(cfg Config) *HoneyBadger {
 	}
 }
 
+// Messages returns all the internal messages from the message que. Note that
+// the que will be empty after invoking this method.
+func (hb *HoneyBadger) Messages() []MessageTuple {
+	return hb.messageQue.messages()
+}
+
 // AddTransaction adds the given transaction to the internal buffer.
 func (hb *HoneyBadger) AddTransaction(tx Transaction) {
 	hb.txBuffer.push(tx)
@@ -67,6 +73,7 @@ func (hb *HoneyBadger) HandleMessage(sid, epoch uint64, msg *ACSMessage) error {
 	if !ok {
 		// Ignore this message, it comes from an older epoch.
 		if epoch < hb.epoch {
+			log.Warnf("ignoring old epoch")
 			return nil
 		}
 		acs = NewACS(hb.Config)
@@ -81,6 +88,17 @@ func (hb *HoneyBadger) HandleMessage(sid, epoch uint64, msg *ACSMessage) error {
 	}
 	hb.removeOldEpochs(epoch)
 	return nil
+}
+
+// Start attempt to start the consensus engine.
+// TODO(@anthdm): Reconsider API change.
+func (hb *HoneyBadger) Start() error {
+	return hb.propose()
+}
+
+// Outputs returns the commited transactions per epoch.
+func (hb *HoneyBadger) Outputs() map[uint64][]Transaction {
+	return hb.outputs
 }
 
 // propose will propose a new batch for the current epoch.
@@ -161,13 +179,13 @@ func (hb *HoneyBadger) getOrNewACSInstance(epoch uint64) *ACS {
 
 // removeOldEpochs removes the ACS instances that have already been terminated.
 func (hb *HoneyBadger) removeOldEpochs(epoch uint64) {
-	for i := epoch; i < hb.epoch; i++ {
+	for i := epoch; i < hb.epoch-1; i++ {
 		delete(hb.acsInstances, i)
 	}
 }
 
-func (hb *HoneyBadger) addMessages(msgs []messageTuple) {
+func (hb *HoneyBadger) addMessages(msgs []MessageTuple) {
 	for _, msg := range msgs {
-		hb.messageQue.addMessage(HBMessage{hb.epoch, msg.payload}, msg.to)
+		hb.messageQue.addMessage(HBMessage{hb.epoch, msg.Payload}, msg.To)
 	}
 }

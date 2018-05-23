@@ -3,12 +3,14 @@ package hbbft
 import (
 	"bytes"
 	"math/rand"
+	"sync"
 	"time"
 )
 
 // buffer holds an uncommited pool of arbitrary data. In blockchain parlance
 // this would be the unbound transaction list.
 type buffer struct {
+	lock sync.RWMutex
 	data []Transaction
 }
 
@@ -21,12 +23,16 @@ func newBuffer() *buffer {
 
 // push pushes v to the buffer.
 func (b *buffer) push(tx Transaction) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
 	b.data = append(b.data, tx)
 }
 
 // @optimize: This can be much more efficient.
 // delete removes the given slice of Transactions from the buffer.
 func (b *buffer) delete(txx []Transaction) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
 	for i := 0; i < len(b.data); i++ {
 		if isInTxList(b.data[i], txx) {
 			b.data = append(b.data[:i], b.data[i+1:]...)
@@ -46,6 +52,8 @@ func isInTxList(tx Transaction, txx []Transaction) bool {
 
 // len return the current length of the buffer.
 func (b *buffer) len() int {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
 	return len(b.data)
 }
 
