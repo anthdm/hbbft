@@ -31,14 +31,20 @@ func (b *buffer) push(tx Transaction) {
 // @optimize: This can be much more efficient.
 // delete removes the given slice of Transactions from the buffer.
 func (b *buffer) delete(txx []Transaction) {
-	b.lock.Lock()
-	defer b.lock.Unlock()
+	temp := make(map[string]Transaction)
 	for i := 0; i < len(b.data); i++ {
-		if isInTxList(b.data[i], txx) {
-			b.data = append(b.data[:i], b.data[i+1:]...)
-			i--
-		}
+		temp[string(b.data[i].Hash())] = b.data[i]
 	}
+	for i := 0; i < len(txx); i++ {
+		delete(temp, string(txx[i].Hash()))
+	}
+	data := make([]Transaction, len(temp))
+	i := 0
+	for _, tx := range temp {
+		data[i] = tx
+		i++
+	}
+	b.data = data
 }
 
 func isInTxList(tx Transaction, txx []Transaction) bool {

@@ -164,8 +164,7 @@ func (hb *HoneyBadger) maybeProcessOutput() error {
 		hb.ID, len(txBatch), hb.epoch)
 
 	hb.epoch++
-	hb.propose()
-	return nil
+	return hb.propose()
 }
 
 func (hb *HoneyBadger) getOrNewACSInstance(epoch uint64) *ACS {

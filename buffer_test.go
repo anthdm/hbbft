@@ -1,6 +1,7 @@
 package hbbft
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -9,6 +10,22 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestBufferDelete(t *testing.T) {
+	b := newBuffer()
+	txx := make([]Transaction, 10)
+	for i := 0; i < len(txx); i++ {
+		tx := &tx{rand.Uint64()}
+		txx[i] = tx
+		b.push(tx)
+	}
+	b.delete(txx[:4])
+	for _, tx := range txx[:4] {
+		for i := 0; i < len(b.data); i++ {
+			assert.False(t, bytes.Compare(tx.Hash(), b.data[i].Hash()) == 0)
+		}
+	}
+}
 
 func TestBufferPush(t *testing.T) {
 	var (

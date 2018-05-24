@@ -3,10 +3,7 @@ package hbbft
 import (
 	"fmt"
 	"sync"
-	"time"
 )
-
-var latency = 0 * time.Millisecond
 
 // LocalTransport implements a local Transport. This is used to test hbbft
 // without going over the network.
@@ -35,7 +32,6 @@ func (t *LocalTransport) Consume() <-chan RPC {
 func (t *LocalTransport) SendProofMessages(id uint64, msgs []interface{}) error {
 	i := 0
 	for addr := range t.peers {
-		time.Sleep(latency)
 		if err := t.makeRPC(id, addr, msgs[i]); err != nil {
 			return err
 		}
@@ -56,7 +52,6 @@ func (t *LocalTransport) Broadcast(id uint64, msg interface{}) error {
 
 // SendMessage implements the transport interface.
 func (t *LocalTransport) SendMessage(from, to uint64, msg interface{}) error {
-	time.Sleep(latency)
 	return t.makeRPC(from, to, msg)
 }
 
