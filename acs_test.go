@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -28,7 +29,7 @@ func TestACSWithNormalNodes(t *testing.T) {
 	go func() {
 		for {
 			res := <-resultCh
-			assert.Equal(t, len(nodes), len(res))
+			assert.True(t, len(res) >= len(nodes)-1)
 			for id, result := range res {
 				assert.Equal(t, inputs[int(id)], result)
 			}
@@ -36,9 +37,24 @@ func TestACSWithNormalNodes(t *testing.T) {
 		}
 	}()
 
+	go func() {
+		for {
+			msg := <-messages
+			to := nodes[msg.msg.To]
+			to.acs.handleMessage(msg.from, msg.msg.Payload.(*ACSMessage))
+			for _, msg := range nodes[msg.msg.To].acs.messageQue.messages() {
+				messages <- testMsg{to.acs.ID, msg}
+			}
+			if output := to.acs.Output(); output != nil {
+				resultCh <- output
+			}
+		}
+	}()
+
 	for nodeID, value := range inputs {
 		assert.Nil(t, nodes[nodeID].inputValue(value))
 	}
+
 	wg.Wait()
 }
 
@@ -76,6 +92,13 @@ func TestACSOutputIsNilAfterConsuming(t *testing.T) {
 	assert.Nil(t, acs.Output())
 }
 
+type testMsg struct {
+	from uint64
+	msg  MessageTuple
+}
+
+var messages = make(chan testMsg, 1024)
+
 type testACSNode struct {
 	acs       *ACS
 	transport Transport
@@ -93,20 +116,24 @@ func newTestACSNode(acs *ACS, tr Transport, resultCh chan map[uint64][]byte) *te
 }
 
 func (n *testACSNode) run() {
+	count := 0
 	for {
 		select {
 		case rpc := <-n.rpcCh:
+			count++
 			msg := rpc.Payload.(*ACSMessage)
 			if err := n.acs.HandleMessage(rpc.NodeID, msg); err != nil {
 				log.Println(err)
 				continue
 			}
 			if output := n.acs.Output(); output != nil {
+				logrus.Warnf("%d cycles for output this is id (%d)", count, n.acs.ID)
+				count = 0
 				n.resultCh <- output
-				log.Printf("ACS (%d) outputed his result %v", n.acs.ID, output)
 			}
 			for _, msg := range n.acs.messageQue.messages() {
-				go n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
+				// n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
+				messages <- testMsg{msg.To, msg}
 			}
 		}
 	}
@@ -117,7 +144,8 @@ func (n *testACSNode) inputValue(value []byte) error {
 		return err
 	}
 	for _, msg := range n.acs.messageQue.messages() {
-		go n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
+		// n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
+		messages <- testMsg{n.acs.ID, msg}
 	}
 	return nil
 }

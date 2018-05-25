@@ -1,6 +1,7 @@
 package hbbft
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -37,8 +38,6 @@ type AuxRequest struct {
 type BBA struct {
 	// Config holds the BBA configuration.
 	Config
-	// Unique id of the proposing instance.
-	pid uint64
 	// Current epoch.
 	epoch uint32
 	//  Bval requests we accepted this epoch.
@@ -66,16 +65,16 @@ type BBA struct {
 	// control flow tuples for internal channel communication.
 	inputCh   chan bbaInputTuple
 	messageCh chan bbaMessageTuple
+	msgCount  int
 }
 
 // NewBBA returns a new instance of the Binary Byzantine Agreement.
-func NewBBA(cfg Config, pid uint64) *BBA {
+func NewBBA(cfg Config) *BBA {
 	if cfg.F == 0 {
 		cfg.F = (cfg.N - 1) / 3
 	}
 	bba := &BBA{
 		Config:          cfg,
-		pid:             pid,
 		recvBval:        make(map[uint64]bool),
 		recvAux:         make(map[uint64]bool),
 		sentBvals:       []bool{},
@@ -123,6 +122,7 @@ func (b *BBA) InputValue(val bool) error {
 // HandleMessage will process the given rpc message. The caller is resposible to
 // make sure only RPC messages are passed that are elligible for the BBA protocol.
 func (b *BBA) HandleMessage(senderID uint64, msg *AgreementMessage) error {
+	b.msgCount++
 	t := bbaMessageTuple{
 		senderID: senderID,
 		msg:      msg,
@@ -184,23 +184,25 @@ func (b *BBA) run() {
 }
 
 // inputValue will set the given val as the initial value to be proposed in the
-// Agreement and returns an initial AgreementMessage or an error.
+// Agreement.
 func (b *BBA) inputValue(val bool) error {
 	// Make sure we are in the first epoch round.
 	if b.epoch != 0 || b.estimated != nil {
-		// return errors.New(
-		// 	"proposing initial value can only be done in the first epoch")
-		return nil
+		return errors.New("not in 0 epoch")
 	}
 	b.estimated = val
 	b.sentBvals = append(b.sentBvals, val)
 	b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{val}))
-	return b.handleBvalRequest(b.pid, val)
+	return b.handleBvalRequest(b.ID, val)
 }
 
 // handleMessage will process the given rpc message. The caller is resposible to
 // make sure only RPC messages are passed that are elligible for the BBA protocol.
 func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
+	if b.done {
+		log.Warnf("bba instance (%d) already terminated", b.ID)
+		return nil
+	}
 	// Ignore messages from older epochs.
 	if msg.Epoch < int(b.epoch) {
 		log.Debugf(
@@ -213,9 +215,6 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 	if msg.Epoch > int(b.epoch) {
 		b.delayedMessages = append(b.delayedMessages, delayedMessage{senderID, msg})
 		return nil
-	}
-	if b.done {
-		return fmt.Errorf("bba instance (%d) already terminated", b.ID)
 	}
 
 	switch t := msg.Message.(type) {
@@ -238,12 +237,12 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 	if lenBval == 2*b.F+1 {
 		wasEmptyBinValues := len(b.binValues) == 0
 		b.binValues = append(b.binValues, val)
-		// If inputs == 1 broadcast output(b) and handle the output ourselfs.
+		// If inputs > 0 broadcast output(b) and handle the output ourselfs.
 		// Wait until binValues > 0, then broadcast AUX(b). The AUX(b) broadcast
 		// may only occure once per epoch.
 		if wasEmptyBinValues {
 			b.addMessage(NewAgreementMessage(int(b.epoch), &AuxRequest{val}))
-			b.handleAuxRequest(b.pid, val)
+			b.handleAuxRequest(b.ID, val)
 		}
 		return nil
 	}
@@ -252,7 +251,7 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 	if lenBval == b.F+1 && !b.hasSentBval(val) {
 		b.sentBvals = append(b.sentBvals, val)
 		b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{val}))
-		return b.handleBvalRequest(b.pid, val)
+		return b.handleBvalRequest(b.ID, val)
 	}
 	return nil
 }
@@ -283,14 +282,14 @@ func (b *BBA) tryOutputAgreement() {
 	// - a value b is output in some epoch r
 	// - the value (coin r) = b for some round r' > r
 	if b.done || b.decision != nil && b.decision.(bool) == coin {
-		log.Debugf("instance (%d) is done", b.pid)
+		log.Debugf("instance (%d) is done", b.ID)
 		b.done = true
 		return
 	}
 
 	log.Debugf(
 		"id (%d) is advancing to the next epoch! (%d) received (%d) aux messages",
-		b.pid, b.epoch+1, lenOutputs,
+		b.ID, b.epoch+1, lenOutputs,
 	)
 
 	// Start the next epoch.
@@ -304,7 +303,8 @@ func (b *BBA) tryOutputAgreement() {
 		if b.decision == nil && values[0] == coin {
 			b.output = values[0]
 			b.decision = values[0]
-			log.Debugf("id (%d) outputed a decision (%v)", b.ID, values[0])
+			log.Debugf("id (%d) outputed a decision (%v) after (%d) msgs", b.ID, values[0], b.msgCount)
+			b.msgCount = 0
 		}
 	}
 	estimated := b.estimated.(bool)

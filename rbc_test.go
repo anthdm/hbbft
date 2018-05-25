@@ -188,7 +188,7 @@ func (e *testRBCEngine) run() {
 				continue
 			}
 			for _, msg := range e.rbc.Messages() {
-				go e.transport.Broadcast(e.rbc.ID, msg)
+				e.transport.Broadcast(e.rbc.ID, msg)
 			}
 			if output := e.rbc.Output(); output != nil {
 				// Faulty node will refuse to send its produced output, causing
@@ -214,7 +214,7 @@ func (e *testRBCEngine) inputValue(data []byte) error {
 	for i := 0; i < len(reqs); i++ {
 		msgs[i] = reqs[i]
 	}
-	go e.transport.SendProofMessages(e.rbc.ID, msgs)
+	e.transport.SendProofMessages(e.rbc.ID, msgs)
 	return nil
 }
 
