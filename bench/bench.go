@@ -13,12 +13,12 @@ import (
 func main() {
 	var (
 		txSize = 128  // bytes/tx
-		nTx    = 8000 // number of transactions in the buffers
+		nTx    = 1000 // number of transactions in the buffers
 		nNodes = 4    // number of nodes in the network
 	)
 	nodes := makeNodes(nNodes, nTx, txSize)
 	for _, node := range nodes {
-		node.start()
+		go node.start()
 	}
 	time.Sleep(5 * time.Second)
 	for _, node := range nodes {
@@ -66,6 +66,7 @@ func (n *node) run() {
 			}
 			for _, msg := range n.hb.Messages() {
 				n.transport.SendMessage(n.hb.ID, msg.To, msg.Payload)
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
 	}
