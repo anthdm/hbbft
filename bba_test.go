@@ -1,11 +1,10 @@
 package hbbft
 
 import (
-	"log"
 	"sync"
 	"testing"
-	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,110 +18,29 @@ import (
 // Test BBA with 2 false and 2 true nodes, cause binary agreement is not a
 // majority vote it guarantees that all good nodes output a least the output of
 // one good node. Hence the output should be true for all the nodes.
-func TestAgreementWith2FalseNodes(t *testing.T) {
-	var (
-		pid      = 0
-		nNodes   = 4
-		resultCh = make(chan bool)
-		nodes    = makeBBANodes(nNodes, pid, resultCh)
-		wg       sync.WaitGroup
-	)
-	wg.Add(nNodes)
-	go func() {
-		// Expect all nodes to output true.
-		for res := range resultCh {
-			t.Log(res)
-			assert.True(t, res)
-			wg.Done()
-		}
-	}()
-	assert.Nil(t, nodes[0].inputValue(false))
-	assert.Nil(t, nodes[1].inputValue(true))
-	assert.Nil(t, nodes[2].inputValue(true))
-	assert.Nil(t, nodes[3].inputValue(false))
-	wg.Wait()
+
+func TestAllNodesFaultyAgreement(t *testing.T) {
+	testAgreement(t, []bool{false, false, false, false}, false)
 }
 
-// Test BBA where most of the nodes input false, which should result in false
-// output for all the good nodes.
-func TestAgreementWithFalseNodes(t *testing.T) {
-	var (
-		pid      = 0
-		nNodes   = 4
-		resultCh = make(chan bool)
-		nodes    = makeBBANodes(nNodes, pid, resultCh)
-		wg       sync.WaitGroup
-	)
-	wg.Add(nNodes)
-	go func() {
-		// Expect all nodes to output true.
-		for res := range resultCh {
-			t.Log(res)
-			assert.False(t, res)
-			wg.Done()
-		}
-	}()
-	assert.Nil(t, nodes[0].inputValue(false))
-	assert.Nil(t, nodes[1].inputValue(false))
-	assert.Nil(t, nodes[2].inputValue(true))
-	assert.Nil(t, nodes[3].inputValue(false))
-	wg.Wait()
+func TestFaultyAgreement(t *testing.T) {
+	testAgreement(t, []bool{true, false, false, false}, false)
 }
 
-// Test a round of BBA where 1 of the nodes has not completed the broadcast
-// yet and hence get false as input.
-func TestAgreementOneFalseNode(t *testing.T) {
-	var (
-		pid      = 0
-		nNodes   = 4
-		resultCh = make(chan bool)
-		nodes    = makeBBANodes(nNodes, pid, resultCh)
-		wg       sync.WaitGroup
-	)
-	wg.Add(nNodes)
-	go func() {
-		// Expect all nodes to output true.
-		for res := range resultCh {
-			assert.True(t, res)
-			wg.Done()
-		}
-	}()
-	assert.Nil(t, nodes[0].inputValue(true))
-	assert.Nil(t, nodes[1].inputValue(true))
-	assert.Nil(t, nodes[2].inputValue(true))
-	assert.Nil(t, nodes[3].inputValue(false))
-	wg.Wait()
+func TestAgreement2FalseNodes(t *testing.T) {
+	testAgreement(t, []bool{true, false, true, false}, true)
 }
 
-// Test a round of BBA where all nodes have completed the broadcast and hence
-// input all true.
-func TestAgreementAllGoodNodes(t *testing.T) {
-	var (
-		pid      = 0
-		nNodes   = 4
-		resultCh = make(chan bool)
-		nodes    = makeBBANodes(nNodes, pid, resultCh)
-		wg       sync.WaitGroup
-	)
-	wg.Add(nNodes)
-	go func() {
-		// Expect all nodes to output true.
-		for {
-			res := <-resultCh
-			assert.True(t, res)
-			wg.Done()
-		}
-	}()
-	// Let all nodes input true.
-	assert.Nil(t, nodes[0].inputValue(true))
-	assert.Nil(t, nodes[1].inputValue(true))
-	assert.Nil(t, nodes[2].inputValue(true))
-	assert.Nil(t, nodes[3].inputValue(true))
-	wg.Wait()
+func TestAgreement1FalseNode(t *testing.T) {
+	testAgreement(t, []bool{true, false, true, true}, true)
+}
+
+func TestAgreementGoodNodes(t *testing.T) {
+	testAgreement(t, []bool{true, true, true, true}, true)
 }
 
 func TestBBAStepByStep(t *testing.T) {
-	bba := NewBBA(Config{N: 4, ID: 0}, uint64(0))
+	bba := NewBBA(Config{N: 4, ID: 0})
 
 	// Set our input value.
 	assert.Nil(t, bba.InputValue(true))
@@ -164,7 +82,7 @@ func TestBBAStepByStep(t *testing.T) {
 
 func TestNewBBA(t *testing.T) {
 	cfg := Config{N: 4}
-	bba := NewBBA(cfg, 0)
+	bba := NewBBA(cfg)
 	assert.Equal(t, 0, len(bba.binValues))
 	assert.Equal(t, 0, len(bba.recvBval))
 	assert.Equal(t, 0, len(bba.recvAux))
@@ -176,7 +94,7 @@ func TestNewBBA(t *testing.T) {
 
 func TestAdvanceEpochInBBA(t *testing.T) {
 	cfg := Config{N: 4}
-	bba := NewBBA(cfg, 0)
+	bba := NewBBA(cfg)
 	bba.epoch = 8
 	bba.binValues = []bool{false, true, true}
 	bba.sentBvals = []bool{false, true}
@@ -191,70 +109,74 @@ func TestAdvanceEpochInBBA(t *testing.T) {
 	assert.Equal(t, uint32(8+1), bba.epoch)
 }
 
-func makeBBANodes(n, pid int, resultCh chan bool) []*testBBANode {
-	transports := makeTransports(n)
-	connectTransports(transports)
-	nodes := make([]*testBBANode, len(transports))
-
-	for i, tr := range transports {
-		cfg := Config{
-			N:  len(nodes),
-			ID: uint64(i),
+func testAgreement(t *testing.T, inputs []bool, expect bool) {
+	assert.True(t, len(inputs) == 4)
+	var (
+		messages = make(chan testAgreementMessage, 56)
+		bbas     = makeBBAInstances(4)
+		result   = make(chan bool)
+		wg       sync.WaitGroup
+	)
+	logrus.SetLevel(logrus.DebugLevel)
+	go func() {
+		for {
+			msg := <-messages
+			bba := bbas[msg.to]
+			if err := bba.HandleMessage(msg.from, msg.msg); err != nil {
+				t.Fatal(err)
+			}
+			for _, msg := range bba.Messages() {
+				for _, id := range excludeID([]uint64{0, 1, 2, 3}, bba.ID) {
+					messages <- testAgreementMessage{bba.ID, id, msg}
+				}
+			}
+			if output := bba.Output(); output != nil {
+				result <- output.(bool)
+			}
 		}
-		nodes[i] = newTestBBANode(uint64(i), tr, resultCh)
-		nodes[i].bba = NewBBA(cfg, uint64(pid))
-		go nodes[i].run()
-	}
-	return nodes
-}
+	}()
 
-type testBBANode struct {
-	id        uint64
-	bba       *BBA
-	transport Transport
-	rpcCh     <-chan RPC
-	resultCh  chan bool
-}
+	go func() {
+		for {
+			b := <-result
+			assert.Equal(t, expect, b)
+			wg.Done()
+		}
+	}()
 
-func newTestBBANode(id uint64, tr Transport, resultCh chan bool) *testBBANode {
-	return &testBBANode{
-		id:        id,
-		transport: tr,
-		rpcCh:     tr.Consume(),
-		resultCh:  resultCh,
-	}
-}
-
-func (n *testBBANode) inputValue(b bool) error {
-	if err := n.bba.InputValue(b); err != nil {
-		return err
-	}
-
-	for _, msg := range n.bba.Messages() {
-		go n.transport.Broadcast(n.id, msg)
-	}
-	time.Sleep(10 * time.Millisecond)
-	return nil
-}
-
-func (n *testBBANode) run() {
-	for {
-		select {
-		case rpc := <-n.rpcCh:
-			switch t := rpc.Payload.(type) {
-			case *AgreementMessage:
-				if err := n.bba.HandleMessage(rpc.NodeID, t); err != nil {
-					log.Println(err)
-				}
-				for _, msg := range n.bba.Messages() {
-					go n.transport.Broadcast(n.id, msg)
-				}
-				if out := n.bba.Output(); out != nil {
-					n.resultCh <- out.(bool)
-				}
+	for i, b := range inputs {
+		wg.Add(1)
+		assert.Nil(t, bbas[i].InputValue(b))
+		for _, msg := range bbas[i].Messages() {
+			for _, id := range excludeID([]uint64{0, 1, 2, 3}, bbas[i].ID) {
+				messages <- testAgreementMessage{bbas[i].ID, id, msg}
 			}
 		}
 	}
+	wg.Wait()
 }
 
-//func init() { logrus.SetLevel(logrus.DebugLevel) }
+func excludeID(ids []uint64, id uint64) []uint64 {
+	dest := []uint64{}
+	for _, i := range ids {
+		if i != id {
+			dest = append(dest, i)
+		}
+	}
+	return dest
+}
+
+func makeBBAInstances(n int) []*BBA {
+	bbas := make([]*BBA, n)
+	for i := 0; i < n; i++ {
+		bbas[i] = NewBBA(Config{N: n, ID: uint64(i)})
+		go bbas[i].run()
+	}
+	return bbas
+}
+
+type testAgreementMessage struct {
+	from uint64
+	to   uint64
+	msg  *AgreementMessage
+}

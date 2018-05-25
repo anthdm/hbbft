@@ -2,8 +2,6 @@ package hbbft
 
 import (
 	"fmt"
-
-	log "github.com/sirupsen/logrus"
 )
 
 // ACSMessage represents a message sent between nodes in the ACS protocol.
@@ -47,6 +45,8 @@ type ACS struct {
 	// Que of ACSMessages that need to be broadcasted after each received
 	// and processed a message.
 	messageQue *messageQue
+	// Whether this ACS instance has already has decided output or not.
+	decided bool
 
 	// control flow tuples for internal channel communication.
 	inputCh   chan acsInputTuple
@@ -93,7 +93,7 @@ func NewACS(cfg Config) *ACS {
 	// Create all the instances for the participating nodes
 	for _, id := range cfg.Nodes {
 		acs.rbcInstances[id] = NewRBC(cfg, id)
-		acs.bbaInstances[id] = NewBBA(cfg, cfg.ID)
+		acs.bbaInstances[id] = NewBBA(cfg)
 	}
 	go acs.run()
 	return acs
@@ -146,6 +146,18 @@ func (a *ACS) Output() map[uint64][]byte {
 		return out
 	}
 	return nil
+}
+
+// Done returns true whether ACS has completed its agreements and cleared its
+// messageQue.
+func (a *ACS) Done() bool {
+	agreementsDone := true
+	for _, bba := range a.bbaInstances {
+		if !bba.done {
+			agreementsDone = false
+		}
+	}
+	return agreementsDone && a.messageQue.len() == 0
 }
 
 // inputValue sets the input value for broadcast and returns an initial set of
@@ -219,7 +231,6 @@ func (a *ACS) processBroadcast(pid uint64, fun func(rbc *RBC) error) error {
 		a.addMessage(pid, msg)
 	}
 	if output := rbc.Output(); output != nil {
-		log.Debugf("(%d) rbc instance has produced an output (%v)", pid, output)
 		a.rbcResults[pid] = output
 		return a.processAgreement(pid, func(bba *BBA) error {
 			if bba.AcceptInput() {
@@ -247,6 +258,9 @@ func (a *ACS) processAgreement(pid uint64, fun func(bba *BBA) error) error {
 	}
 	// Check if we got an output.
 	if output := bba.Output(); output != nil {
+		if _, ok := a.bbaResults[pid]; ok {
+			return fmt.Errorf("multiple bba results for (%d)", pid)
+		}
 		a.bbaResults[pid] = output.(bool)
 		// When received 1 from at least (N - f) instances of BA, provide input 0.
 		// to each other instance of BBA that has not provided his input yet.
@@ -271,6 +285,9 @@ func (a *ACS) processAgreement(pid uint64, fun func(bba *BBA) error) error {
 }
 
 func (a *ACS) tryCompleteAgreement() {
+	if a.decided || a.countTruthyAgreements() < a.N-a.F {
+		return
+	}
 	if len(a.bbaResults) < a.N {
 		return
 	}
@@ -288,6 +305,7 @@ func (a *ACS) tryCompleteAgreement() {
 	}
 	if len(nodesThatProvidedTrue) == len(bcResults) {
 		a.output = bcResults
+		a.decided = true
 	}
 }
 

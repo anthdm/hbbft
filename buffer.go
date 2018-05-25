@@ -1,7 +1,6 @@
 package hbbft
 
 import (
-	"bytes"
 	"math/rand"
 	"sync"
 	"time"
@@ -31,6 +30,8 @@ func (b *buffer) push(tx Transaction) {
 // @optimize: This can be much more efficient.
 // delete removes the given slice of Transactions from the buffer.
 func (b *buffer) delete(txx []Transaction) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
 	temp := make(map[string]Transaction)
 	for i := 0; i < len(b.data); i++ {
 		temp[string(b.data[i].Hash())] = b.data[i]
@@ -45,15 +46,6 @@ func (b *buffer) delete(txx []Transaction) {
 		i++
 	}
 	b.data = data
-}
-
-func isInTxList(tx Transaction, txx []Transaction) bool {
-	for i := 0; i < len(txx); i++ {
-		if bytes.Compare(tx.Hash(), txx[i].Hash()) == 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // len return the current length of the buffer.
