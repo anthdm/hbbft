@@ -26,6 +26,8 @@ type Config struct {
 	ID uint64
 	// Identifiers of the participating nodes.
 	Nodes []uint64
+	// Maximum number of transactions that will be comitted in one epoch.
+	BatchSize int
 }
 
 // HoneyBadger represents the top-level protocol of the hbbft consensus.
@@ -43,6 +45,8 @@ type HoneyBadger struct {
 	outputs map[uint64][]Transaction
 	// Que of messages that need to be broadcast after processing a message.
 	messageQue *messageQue
+	// Counter that counts the number of messages sent in one epoch.
+	msgCount int
 }
 
 // NewHoneyBadger returns a new HoneyBadger instance.
@@ -69,6 +73,7 @@ func (hb *HoneyBadger) AddTransaction(tx Transaction) {
 
 // HandleMessage will process the given ACSMessage for the given epoch.
 func (hb *HoneyBadger) HandleMessage(sid, epoch uint64, msg *ACSMessage) error {
+	hb.msgCount++
 	acs, ok := hb.acsInstances[epoch]
 	if !ok {
 		// Ignore this message, it comes from an older epoch.
@@ -107,11 +112,17 @@ func (hb *HoneyBadger) propose() error {
 		log.Warn("buffer is empty")
 		return nil
 	}
-	// TODO: clean this up, factor out into own function? Make batch size
-	// configurable.
-	scalar := 4
-	batchSize := (len(hb.Nodes) * 2) * scalar
-	batchSize = int(math.Min(float64(batchSize), float64(hb.txBuffer.len())))
+	batchSize := hb.BatchSize
+	// If no batch size is configured, choose somewhat of an ideal batch size
+	// that will scale with the number of nodes added to the network as
+	// decribed in the paper.
+	if batchSize == 0 {
+		// TODO: clean this up, factor out into own function? Make batch size
+		// configurable.
+		scalar := 20
+		batchSize = (len(hb.Nodes) * 2) * scalar
+		batchSize = int(math.Min(float64(batchSize), float64(hb.txBuffer.len())))
+	}
 	n := int(math.Max(float64(1), float64(batchSize/len(hb.Nodes))))
 	batch := sample(hb.txBuffer.data[:batchSize], n)
 
@@ -156,14 +167,18 @@ func (hb *HoneyBadger) maybeProcessOutput() error {
 		i++
 	}
 	// Delete the transactions from the buffer.
-	hb.txBuffer.delete(txBatch)
+	//hb.txBuffer.delete(txBatch)
 	// Add the transaction to the commit log.
 	hb.outputs[hb.epoch] = txBatch
-
-	log.Infof("node (%d) commited (%d) transactions in epoch (%d)",
-		hb.ID, len(txBatch), hb.epoch)
-
 	hb.epoch++
+
+	if hb.epoch%100 == 0 {
+		log.Debugf("node (%d) commited (%d) transactions in epoch (%d)",
+			hb.ID, len(txBatch), hb.epoch)
+		log.Debugf("%d msgs/epoch", hb.msgCount)
+	}
+	hb.msgCount = 0
+
 	return hb.propose()
 }
 
