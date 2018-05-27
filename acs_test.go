@@ -1,61 +1,75 @@
 package hbbft
 
 import (
-	"log"
-	"sync"
 	"testing"
+	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
 // Test ACS with 4 good nodes. The result should be that at least the output
 // of (N - f) nodes has been provided.
-func TestACSWithNormalNodes(t *testing.T) {
-	var (
-		resultCh = make(chan map[uint64][]byte)
-		nodes    = makeACSNodes(4, 0, resultCh)
-		wg       sync.WaitGroup
-	)
-
+func TestACSGoodNodes(t *testing.T) {
 	inputs := map[int][]byte{
 		0: []byte("AAAAAA"),
 		1: []byte("BBBBBB"),
 		2: []byte("CCCCCC"),
 		3: []byte("DDDDDD"),
 	}
+	testCommonSubset(t, inputs)
+}
 
-	wg.Add(len(nodes))
+func testCommonSubset(t *testing.T, inputs map[int][]byte) {
+	type acsResult struct {
+		nodeID  uint64
+		results map[uint64][]byte
+	}
+	var (
+		resultCh = make(chan acsResult, 4)
+		nodes    = makeACSNetwork(4)
+		messages = make(chan testMsg)
+	)
+
 	go func() {
 		for {
-			res := <-resultCh
-			assert.True(t, len(res) >= len(nodes)-1)
-			for id, result := range res {
-				assert.Equal(t, inputs[int(id)], result)
-			}
-			wg.Done()
-		}
-	}()
-
-	go func() {
-		for {
-			msg := <-messages
-			to := nodes[msg.msg.To]
-			to.acs.handleMessage(msg.from, msg.msg.Payload.(*ACSMessage))
-			for _, msg := range nodes[msg.msg.To].acs.messageQue.messages() {
-				messages <- testMsg{to.acs.ID, msg}
-			}
-			if output := to.acs.Output(); output != nil {
-				resultCh <- output
+			select {
+			case msg := <-messages:
+				acs := nodes[msg.msg.To]
+				err := acs.HandleMessage(msg.from, msg.msg.Payload.(*ACSMessage))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, msg := range acs.messageQue.messages() {
+					go func(msg MessageTuple) {
+						messages <- testMsg{acs.ID, msg}
+					}(msg)
+				}
+				if output := acs.Output(); output != nil {
+					resultCh <- acsResult{acs.ID, output}
+				}
 			}
 		}
 	}()
 
 	for nodeID, value := range inputs {
-		assert.Nil(t, nodes[nodeID].inputValue(value))
+		assert.Nil(t, nodes[nodeID].InputValue(value))
+		for _, msg := range nodes[nodeID].messageQue.messages() {
+			messages <- testMsg{uint64(nodeID), msg}
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	wg.Wait()
+	count := 0
+	for res := range resultCh {
+		assert.True(t, len(res.results) >= len(nodes)-1)
+		for id, result := range res.results {
+			assert.Equal(t, inputs[int(id)], result)
+		}
+		count++
+		if count == 4 {
+			break
+		}
+	}
 }
 
 func TestNewACS(t *testing.T) {
@@ -97,76 +111,13 @@ type testMsg struct {
 	msg  MessageTuple
 }
 
-var messages = make(chan testMsg, 1024)
-
-type testACSNode struct {
-	acs       *ACS
-	transport Transport
-	resultCh  chan map[uint64][]byte
-	rpcCh     <-chan RPC
-}
-
-func newTestACSNode(acs *ACS, tr Transport, resultCh chan map[uint64][]byte) *testACSNode {
-	return &testACSNode{
-		resultCh:  resultCh,
-		acs:       acs,
-		transport: tr,
-		rpcCh:     tr.Consume(),
+func makeACSNetwork(n int) []*ACS {
+	network := make([]*ACS, n)
+	for i := 0; i < n; i++ {
+		network[i] = NewACS(Config{N: n, ID: uint64(i), Nodes: makeids(n)})
+		go network[i].run()
 	}
-}
-
-func (n *testACSNode) run() {
-	count := 0
-	for {
-		select {
-		case rpc := <-n.rpcCh:
-			count++
-			msg := rpc.Payload.(*ACSMessage)
-			if err := n.acs.HandleMessage(rpc.NodeID, msg); err != nil {
-				log.Println(err)
-				continue
-			}
-			if output := n.acs.Output(); output != nil {
-				logrus.Warnf("%d cycles for output this is id (%d)", count, n.acs.ID)
-				count = 0
-				n.resultCh <- output
-			}
-			for _, msg := range n.acs.messageQue.messages() {
-				// n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
-				messages <- testMsg{msg.To, msg}
-			}
-		}
-	}
-}
-
-func (n *testACSNode) inputValue(value []byte) error {
-	if err := n.acs.InputValue(value); err != nil {
-		return err
-	}
-	for _, msg := range n.acs.messageQue.messages() {
-		// n.transport.SendMessage(n.acs.ID, msg.To, msg.Payload)
-		messages <- testMsg{n.acs.ID, msg}
-	}
-	return nil
-}
-
-func makeACSNodes(n, pid int, resultCh chan map[uint64][]byte) []*testACSNode {
-	var (
-		transports = makeTransports(n)
-		nodes      = make([]*testACSNode, len(transports))
-		ids        = makeids(n)
-	)
-	connectTransports(transports)
-	for i := 0; i < len(nodes); i++ {
-		cfg := Config{
-			N:     len(nodes),
-			ID:    uint64(i),
-			Nodes: ids,
-		}
-		nodes[i] = newTestACSNode(NewACS(cfg), transports[i], resultCh)
-		go nodes[i].run()
-	}
-	return nodes
+	return network
 }
 
 func makeids(n int) []uint64 {

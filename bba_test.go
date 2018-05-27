@@ -4,7 +4,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -15,10 +14,6 @@ import (
 // 3. If any good node ouputs value (b), then at least one good ndoe receives (b)
 // as input.
 
-// Test BBA with 2 false and 2 true nodes, cause binary agreement is not a
-// majority vote it guarantees that all good nodes output a least the output of
-// one good node. Hence the output should be true for all the nodes.
-
 func TestAllNodesFaultyAgreement(t *testing.T) {
 	testAgreement(t, []bool{false, false, false, false}, false)
 }
@@ -27,6 +22,9 @@ func TestFaultyAgreement(t *testing.T) {
 	testAgreement(t, []bool{true, false, false, false}, false)
 }
 
+// Test BBA with 2 false and 2 true nodes, cause binary agreement is not a
+// majority vote it guarantees that all good nodes output a least the output of
+// one good node. Hence the output should be true for all the nodes.
 func TestAgreement2FalseNodes(t *testing.T) {
 	testAgreement(t, []bool{true, false, true, false}, true)
 }
@@ -112,35 +110,33 @@ func TestAdvanceEpochInBBA(t *testing.T) {
 func testAgreement(t *testing.T, inputs []bool, expect bool) {
 	assert.True(t, len(inputs) == 4)
 	var (
-		messages = make(chan testAgreementMessage, 56)
+		messages = make(chan testAgreementMessage)
 		bbas     = makeBBAInstances(4)
-		result   = make(chan bool)
+		result   = make(chan bool, 4)
 		wg       sync.WaitGroup
 	)
-	logrus.SetLevel(logrus.DebugLevel)
 	go func() {
 		for {
-			msg := <-messages
-			bba := bbas[msg.to]
-			if err := bba.HandleMessage(msg.from, msg.msg); err != nil {
-				t.Fatal(err)
-			}
-			for _, msg := range bba.Messages() {
-				for _, id := range excludeID([]uint64{0, 1, 2, 3}, bba.ID) {
-					messages <- testAgreementMessage{bba.ID, id, msg}
+			select {
+			case msg := <-messages:
+				bba := bbas[msg.to]
+				if err := bba.HandleMessage(msg.from, msg.msg); err != nil {
+					t.Fatal(err)
 				}
+				for _, msg := range bba.Messages() {
+					for _, id := range excludeID([]uint64{0, 1, 2, 3}, bba.ID) {
+						go func(msg *AgreementMessage, id uint64) {
+							messages <- testAgreementMessage{bba.ID, id, msg}
+						}(msg, id)
+					}
+				}
+				if output := bba.Output(); output != nil {
+					result <- output.(bool)
+				}
+			case b := <-result:
+				assert.Equal(t, expect, b)
+				wg.Done()
 			}
-			if output := bba.Output(); output != nil {
-				result <- output.(bool)
-			}
-		}
-	}()
-
-	go func() {
-		for {
-			b := <-result
-			assert.Equal(t, expect, b)
-			wg.Done()
 		}
 	}()
 

@@ -1,7 +1,6 @@
 package hbbft
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 
@@ -188,7 +187,7 @@ func (b *BBA) run() {
 func (b *BBA) inputValue(val bool) error {
 	// Make sure we are in the first epoch round.
 	if b.epoch != 0 || b.estimated != nil {
-		return errors.New("not in 0 epoch")
+		return nil
 	}
 	b.estimated = val
 	b.sentBvals = append(b.sentBvals, val)
@@ -200,7 +199,6 @@ func (b *BBA) inputValue(val bool) error {
 // make sure only RPC messages are passed that are elligible for the BBA protocol.
 func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 	if b.done {
-		log.Warnf("bba instance (%d) already terminated", b.ID)
 		return nil
 	}
 	// Ignore messages from older epochs.
@@ -230,7 +228,9 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 // handleBvalRequest processes the received binary value and fills up the
 // message que if there are any messages that need to be broadcasted.
 func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
+	b.lock.Lock()
 	b.recvBval[senderID] = val
+	b.lock.Unlock()
 	lenBval := b.countBvals(val)
 
 	// When receiving n bval(b) messages from 2f+1 nodes: inputs := inputs u {b}
@@ -257,7 +257,9 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 }
 
 func (b *BBA) handleAuxRequest(senderID uint64, val bool) error {
+	b.lock.Lock()
 	b.recvAux[senderID] = val
+	b.lock.Unlock()
 	b.tryOutputAgreement()
 	return nil
 }
@@ -282,7 +284,6 @@ func (b *BBA) tryOutputAgreement() {
 	// - a value b is output in some epoch r
 	// - the value (coin r) = b for some round r' > r
 	if b.done || b.decision != nil && b.decision.(bool) == coin {
-		log.Debugf("instance (%d) is done", b.ID)
 		b.done = true
 		return
 	}
@@ -349,6 +350,8 @@ func (b *BBA) countOutputs() (int, []bool) {
 
 // countBvals counts all the received Bval inputs matching b.
 func (b *BBA) countBvals(ok bool) int {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
 	n := 0
 	for _, val := range b.recvBval {
 		if val == ok {
