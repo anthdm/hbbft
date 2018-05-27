@@ -1,57 +1,11 @@
 package hbbft
 
 import (
-	"sync"
 	"testing"
+	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
-
-func testCommonSubset(t *testing.T, inputs map[int][]byte) {
-	var (
-		resultCh = make(chan map[uint64][]byte)
-		nodes    = makeACSNetwork(4)
-		messages = make(chan testMsg, 1024)
-		wg       sync.WaitGroup
-	)
-	logrus.SetLevel(logrus.DebugLevel)
-
-	go func() {
-		for {
-			select {
-			case msg := <-messages:
-				acs := nodes[msg.msg.To]
-				err := acs.HandleMessage(msg.from, msg.msg.Payload.(*ACSMessage))
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, msg := range acs.messageQue.messages() {
-					messages <- testMsg{acs.ID, msg}
-				}
-				if output := acs.Output(); output != nil {
-					go func() { resultCh <- output }()
-				}
-			case res := <-resultCh:
-				assert.True(t, len(res) >= len(nodes)-1)
-				for id, result := range res {
-					assert.Equal(t, inputs[int(id)], result)
-				}
-				wg.Done()
-			}
-		}
-	}()
-
-	for nodeID, value := range inputs {
-		wg.Add(1)
-		assert.Nil(t, nodes[nodeID].InputValue(value))
-		for _, msg := range nodes[nodeID].messageQue.messages() {
-			messages <- testMsg{uint64(nodeID), msg}
-		}
-	}
-
-	wg.Wait()
-}
 
 // Test ACS with 4 good nodes. The result should be that at least the output
 // of (N - f) nodes has been provided.
@@ -63,6 +17,59 @@ func TestACSGoodNodes(t *testing.T) {
 		3: []byte("DDDDDD"),
 	}
 	testCommonSubset(t, inputs)
+}
+
+func testCommonSubset(t *testing.T, inputs map[int][]byte) {
+	type acsResult struct {
+		nodeID  uint64
+		results map[uint64][]byte
+	}
+	var (
+		resultCh = make(chan acsResult, 4)
+		nodes    = makeACSNetwork(4)
+		messages = make(chan testMsg)
+	)
+
+	go func() {
+		for {
+			select {
+			case msg := <-messages:
+				acs := nodes[msg.msg.To]
+				err := acs.HandleMessage(msg.from, msg.msg.Payload.(*ACSMessage))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, msg := range acs.messageQue.messages() {
+					go func(msg MessageTuple) {
+						messages <- testMsg{acs.ID, msg}
+					}(msg)
+				}
+				if output := acs.Output(); output != nil {
+					resultCh <- acsResult{acs.ID, output}
+				}
+			}
+		}
+	}()
+
+	for nodeID, value := range inputs {
+		assert.Nil(t, nodes[nodeID].InputValue(value))
+		for _, msg := range nodes[nodeID].messageQue.messages() {
+			messages <- testMsg{uint64(nodeID), msg}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	count := 0
+	for res := range resultCh {
+		assert.True(t, len(res.results) >= len(nodes)-1)
+		for id, result := range res.results {
+			assert.Equal(t, inputs[int(id)], result)
+		}
+		count++
+		if count == 4 {
+			break
+		}
+	}
 }
 
 func TestNewACS(t *testing.T) {
