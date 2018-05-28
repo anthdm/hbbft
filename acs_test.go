@@ -55,8 +55,8 @@ func testCommonSubset(t *testing.T, inputs map[int][]byte) {
 		assert.Nil(t, nodes[nodeID].InputValue(value))
 		for _, msg := range nodes[nodeID].messageQue.messages() {
 			messages <- testMsg{uint64(nodeID), msg}
+			time.Sleep(1 * time.Millisecond)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	count := 0
