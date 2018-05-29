@@ -1,7 +1,6 @@
 package hbbft
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,9 +13,10 @@ import (
 // 3. If any good node ouputs value (b), then at least one good ndoe receives (b)
 // as input.
 
-func TestAllNodesFaultyAgreement(t *testing.T) {
-	testAgreement(t, []bool{false, false, false, false}, false)
-}
+// func TestAllNodesFaultyAgreement(t *testing.T) {
+// 	logrus.SetLevel(logrus.DebugLevel)
+// 	testAgreement(t, []bool{false, false, false, false}, false)
+// }
 
 func TestFaultyAgreement(t *testing.T) {
 	testAgreement(t, []bool{true, false, false, false}, false)
@@ -113,7 +113,6 @@ func testAgreement(t *testing.T, inputs []bool, expect bool) {
 		messages = make(chan testAgreementMessage)
 		bbas     = makeBBAInstances(4)
 		result   = make(chan bool, 4)
-		wg       sync.WaitGroup
 	)
 	go func() {
 		for {
@@ -133,15 +132,21 @@ func testAgreement(t *testing.T, inputs []bool, expect bool) {
 				if output := bba.Output(); output != nil {
 					result <- output.(bool)
 				}
-			case b := <-result:
-				assert.Equal(t, expect, b)
-				wg.Done()
+				for _, msg := range bba.Messages() {
+					for _, id := range excludeID([]uint64{0, 1, 2, 3}, bba.ID) {
+						go func(msg *AgreementMessage, id uint64) {
+							messages <- testAgreementMessage{bba.ID, id, msg}
+						}(msg, id)
+					}
+				}
+				if output := bba.Output(); output != nil {
+					result <- output.(bool)
+				}
 			}
 		}
 	}()
 
 	for i, b := range inputs {
-		wg.Add(1)
 		assert.Nil(t, bbas[i].InputValue(b))
 		for _, msg := range bbas[i].Messages() {
 			for _, id := range excludeID([]uint64{0, 1, 2, 3}, bbas[i].ID) {
@@ -149,7 +154,15 @@ func testAgreement(t *testing.T, inputs []bool, expect bool) {
 			}
 		}
 	}
-	wg.Wait()
+
+	counter := 0
+	for res := range result {
+		assert.Equal(t, expect, res)
+		counter++
+		if counter == 4 {
+			break
+		}
+	}
 }
 
 func excludeID(ids []uint64, id uint64) []uint64 {
