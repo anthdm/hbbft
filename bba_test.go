@@ -132,6 +132,16 @@ func testAgreement(t *testing.T, inputs []bool, expect bool) {
 				if output := bba.Output(); output != nil {
 					result <- output.(bool)
 				}
+				for _, msg := range bba.Messages() {
+					for _, id := range excludeID([]uint64{0, 1, 2, 3}, bba.ID) {
+						go func(msg *AgreementMessage, id uint64) {
+							messages <- testAgreementMessage{bba.ID, id, msg}
+						}(msg, id)
+					}
+				}
+				if output := bba.Output(); output != nil {
+					result <- output.(bool)
+				}
 			}
 		}
 	}()
