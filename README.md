@@ -86,6 +86,8 @@ for epoch, tx := range hb.Outputs() {
 }
 ```
 
+>A working implementation can be found in the [bench folder](https://github.com/anthdm/hbbft/tree/master/bench), where hbbft is implemented over local transport.
+
 ### Current project state
 - [x] Reliable Broadcast Algorithm
 - [x] Binary Byzantine Agreement
