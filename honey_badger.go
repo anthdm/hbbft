@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"math"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -41,6 +42,8 @@ type HoneyBadger struct {
 	txBuffer *buffer
 	// current epoch.
 	epoch uint64
+
+	lock sync.RWMutex
 	// Transactions that are commited in the corresponding epochs.
 	outputs map[uint64][]Transaction
 	// Que of messages that need to be broadcast after processing a message.
@@ -103,7 +106,14 @@ func (hb *HoneyBadger) Start() error {
 
 // Outputs returns the commited transactions per epoch.
 func (hb *HoneyBadger) Outputs() map[uint64][]Transaction {
-	return hb.outputs
+	hb.lock.RLock()
+	out := hb.outputs
+	hb.lock.RUnlock()
+
+	hb.lock.Lock()
+	defer hb.lock.Unlock()
+	hb.outputs = make(map[uint64][]Transaction)
+	return out
 }
 
 // propose will propose a new batch for the current epoch.

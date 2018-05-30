@@ -39,6 +39,53 @@ Run tests
 make test
 ```
 
+### How to plug hbbft in to your existing setup. 
+Create a new instance of HoneyBadger.
+```
+// Create a Config struct with your prefered settings.
+cfg := hbbft.Config{
+    // The number of nodes in the network.
+    N: 4,
+    // Identifier of this node.
+    ID: 101,
+    // Identifiers of the participating nodes. 
+    Nodes: uint64{67, 1, 99, 101},
+    // The prefered batch size. If BatchSize is empty, an ideal batch size will
+    // be choosen for you.
+    BatchSize: 100,
+}
+
+// Create a new instance of the HoneyBadger engine and pass in the config.
+hb := hbbft.NewHoneyBadger(cfg)
+```
+
+Filling the engine with transactions. Hbbft uses an interface to make it compatible with all types of transactions, the only contract a transaction have to fullfill is the `Hash() []byte` method.
+```
+// Transaction is an interface that abstract the underlying data of the actual
+// transaction. This allows package hbbft to be easily adopted by other
+// applications.
+type Transaction interface {
+	Hash() []byte
+}
+
+Adding new transactions can be done be calling the following method on the hb instance.
+hb.AddTransaction(tx) // can be called in routines without any problem.
+```
+
+Starting the engine.
+```
+hb.Start() // will start proposing batches of transactions in the network. 
+```
+
+Applications build on top of hbbft can decide when they access commited transactions. Once consumed the output will be reset.
+```
+hb.Outputs() // returns a map of commited transactions per epoch.
+
+for epoch, tx := range hb.Outputs() {
+  fmt.Printf("batch for epoch %d: %v\n", epoch, tx)
+}
+```
+
 ### Current project state
 - [x] Reliable Broadcast Algorithm
 - [x] Binary Byzantine Agreement
