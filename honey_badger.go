@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"math"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -104,6 +105,11 @@ func (hb *HoneyBadger) Start() error {
 	return hb.propose()
 }
 
+// LenMempool returns the number of transactions in the buffer.
+func (hb *HoneyBadger) LenMempool() int {
+	return hb.txBuffer.len()
+}
+
 // Outputs returns the commited transactions per epoch.
 func (hb *HoneyBadger) Outputs() map[uint64][]Transaction {
 	hb.lock.RLock()
@@ -119,8 +125,8 @@ func (hb *HoneyBadger) Outputs() map[uint64][]Transaction {
 // propose will propose a new batch for the current epoch.
 func (hb *HoneyBadger) propose() error {
 	if hb.txBuffer.len() == 0 {
-		log.Warn("buffer is empty")
-		return nil
+		time.Sleep(2 * time.Second)
+		return hb.propose()
 	}
 	batchSize := hb.BatchSize
 	// If no batch size is configured, choose somewhat of an ideal batch size
@@ -131,8 +137,8 @@ func (hb *HoneyBadger) propose() error {
 		// configurable.
 		scalar := 20
 		batchSize = (len(hb.Nodes) * 2) * scalar
-		batchSize = int(math.Min(float64(batchSize), float64(hb.txBuffer.len())))
 	}
+	batchSize = int(math.Min(float64(batchSize), float64(hb.txBuffer.len())))
 	n := int(math.Max(float64(1), float64(batchSize/len(hb.Nodes))))
 	batch := sample(hb.txBuffer.data[:batchSize], n)
 
@@ -149,6 +155,7 @@ func (hb *HoneyBadger) propose() error {
 }
 
 func (hb *HoneyBadger) maybeProcessOutput() error {
+	start := time.Now()
 	acs, ok := hb.acsInstances[hb.epoch]
 	if !ok {
 		return nil
@@ -177,15 +184,14 @@ func (hb *HoneyBadger) maybeProcessOutput() error {
 		i++
 	}
 	// Delete the transactions from the buffer.
-	//hb.txBuffer.delete(txBatch)
+	hb.txBuffer.delete(txBatch)
 	// Add the transaction to the commit log.
 	hb.outputs[hb.epoch] = txBatch
 	hb.epoch++
 
 	if hb.epoch%100 == 0 {
-		log.Debugf("node (%d) commited (%d) transactions in epoch (%d)",
-			hb.ID, len(txBatch), hb.epoch)
-		log.Debugf("%d msgs/epoch", hb.msgCount)
+		log.Debugf("node (%d) commited (%d) transactions in epoch (%d) took %v",
+			hb.ID, len(txBatch), hb.epoch, time.Since(start))
 	}
 	hb.msgCount = 0
 
