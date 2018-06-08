@@ -15,4 +15,5 @@ The following parameters can be tuned
 - lenNodes (default 4)
 - batchSize (default 500)
 - numCores (default 4)
+- transaction verification delay (default 2ms)
 
