@@ -68,6 +68,7 @@ type RBC struct {
 	output []byte
 
 	// control flow tuples for internal channel communication.
+	closeCh   chan struct{}
 	inputCh   chan rbcInputTuple
 	messageCh chan rbcMessageTuple
 }
@@ -113,6 +114,7 @@ func NewRBC(cfg Config, proposerID uint64) *RBC {
 		numDataShards:   dataShards,
 		messages:        []*BroadcastMessage{},
 		proposerID:      proposerID,
+		closeCh:         make(chan struct{}),
 		inputCh:         make(chan rbcInputTuple),
 		messageCh:       make(chan rbcMessageTuple),
 	}
@@ -147,9 +149,15 @@ func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
 	return <-t.err
 }
 
+func (r *RBC) stop() {
+	close(r.closeCh)
+}
+
 func (r *RBC) run() {
 	for {
 		select {
+		case <-r.closeCh:
+			return
 		case t := <-r.inputCh:
 			msgs, err := r.inputValue(t.value)
 			t.response <- rbcInputResponse{

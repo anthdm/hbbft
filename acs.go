@@ -49,6 +49,7 @@ type ACS struct {
 	decided bool
 
 	// control flow tuples for internal channel communication.
+	closeCh   chan struct{}
 	inputCh   chan acsInputTuple
 	messageCh chan acsMessageTuple
 }
@@ -87,6 +88,7 @@ func NewACS(cfg Config) *ACS {
 		rbcResults:   make(map[uint64][]byte),
 		bbaResults:   make(map[uint64]bool),
 		messageQue:   newMessageQue(),
+		closeCh:      make(chan struct{}),
 		inputCh:      make(chan acsInputTuple),
 		messageCh:    make(chan acsMessageTuple),
 	}
@@ -192,9 +194,15 @@ func (a *ACS) inputValue(data []byte) error {
 	return nil
 }
 
+func (a *ACS) stop() {
+	close(a.closeCh)
+}
+
 func (a *ACS) run() {
 	for {
 		select {
+		case <-a.closeCh:
+			return
 		case t := <-a.inputCh:
 			err := a.inputValue(t.value)
 			t.response <- acsInputResponse{err: err}

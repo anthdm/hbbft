@@ -26,7 +26,7 @@ type message struct {
 var (
 	txDelay  = (3 * time.Millisecond) / numCores
 	messages = make(chan message, 1024*1024)
-	relayCh  = make(chan *Transaction, 1024)
+	relayCh  = make(chan *Transaction, 1024*1024)
 )
 
 func main() {
@@ -47,8 +47,7 @@ func main() {
 
 	// handle the relayed transactions.
 	go func() {
-		for {
-			tx := <-relayCh
+		for tx := range relayCh {
 			for _, node := range nodes {
 				node.addTransactions(tx)
 			}

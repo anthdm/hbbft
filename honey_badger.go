@@ -209,7 +209,17 @@ func (hb *HoneyBadger) getOrNewACSInstance(epoch uint64) *ACS {
 
 // removeOldEpochs removes the ACS instances that have already been terminated.
 func (hb *HoneyBadger) removeOldEpochs(epoch uint64) {
-	for i := epoch; i < hb.epoch-1; i++ {
+	for i, acs := range hb.acsInstances {
+		if i >= hb.epoch-1 {
+			continue
+		}
+		for _, t := range acs.bbaInstances {
+			t.stop()
+		}
+		for _, t := range acs.rbcInstances {
+			t.stop()
+		}
+		acs.stop()
 		delete(hb.acsInstances, i)
 	}
 }

@@ -62,6 +62,7 @@ type BBA struct {
 	messages []*AgreementMessage
 
 	// control flow tuples for internal channel communication.
+	closeCh   chan struct{}
 	inputCh   chan bbaInputTuple
 	messageCh chan bbaMessageTuple
 	msgCount  int
@@ -78,6 +79,7 @@ func NewBBA(cfg Config) *BBA {
 		recvAux:         make(map[uint64]bool),
 		sentBvals:       []bool{},
 		binValues:       []bool{},
+		closeCh:         make(chan struct{}),
 		inputCh:         make(chan bbaInputTuple),
 		messageCh:       make(chan bbaMessageTuple),
 		messages:        []*AgreementMessage{},
@@ -169,11 +171,17 @@ func (b *BBA) addMessage(msg *AgreementMessage) {
 	b.messages = append(b.messages, msg)
 }
 
+func (b *BBA) stop() {
+	close(b.closeCh)
+}
+
 // run makes sure we only process 1 message at the same time, avoiding mutexes
 // and race conditions.
 func (b *BBA) run() {
 	for {
 		select {
+		case <-b.closeCh:
+			return
 		case t := <-b.inputCh:
 			t.err <- b.inputValue(t.value)
 		case t := <-b.messageCh:
