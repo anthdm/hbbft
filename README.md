@@ -99,14 +99,14 @@ for epoch, tx := range hb.Outputs() {
 
 ## TODO
 
-- [ ] Treshold encryption
+- [ ] Threshold encryption
 - [ ] Configurable serialization for transactions
 
 ## References
 
 - [The Honey Badger BFT protocols](https://eprint.iacr.org/2016/199.pdf)
 - [Practical Byzantine Fault Tolerance](http://pmg.csail.mit.edu/papers/osdi99.pdf)
-- [Treshold encryption](https://en.wikipedia.org/wiki/Threshold_cryptosystem)
+- [Threshold encryption](https://en.wikipedia.org/wiki/Threshold_cryptosystem)
 - [Shared secret](https://en.wikipedia.org/wiki/Shared_secret)
 
 ## Other language implementations
