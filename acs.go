@@ -15,7 +15,7 @@ type ACSMessage struct {
 // ACS implements the Asynchronous Common Subset protocol.
 // ACS assumes a network of N nodes that send signed messages to each other.
 // There can be f faulty nodes where (3 * f < N).
-// Each participating node proposes an element for inlcusion. The protocol
+// Each participating node proposes an element for inclusion. The protocol
 // guarantees that all of the good nodes output the same set, consisting of
 // at least (N -f) of the proposed values.
 //
@@ -23,8 +23,8 @@ type ACSMessage struct {
 // ACS creates a Broadcast algorithm for each of the participating nodes.
 // At least (N -f) of these will eventually output the element proposed by that
 // node. ACS will also create and BBA instance for each participating node, to
-// decide whether that node's proposed element should be inlcuded in common set.
-// Whenever an element is received via broadcast, we imput "true" into the
+// decide whether that node's proposed element should be included in common set.
+// Whenever an element is received via broadcast, we input "true" into the
 // corresponding BBA instance. When (N-f) BBA instances have decided true we
 // input false into the remaining ones, where we haven't provided input yet.
 // Once all BBA instances have decided, ACS returns the set of all proposed
@@ -101,6 +101,12 @@ func NewACS(cfg Config) *ACS {
 	return acs
 }
 
+// Messages returns all the internal messages from the message que. Note that
+// the que will be empty after invoking this method.
+func (a *ACS) Messages() []MessageTuple {
+	return a.messageQue.messages()
+}
+
 // InputValue sets the input value for broadcast and returns an initial set of
 // Broadcast and ACS Messages to be broadcasted in the network.
 func (a *ACS) InputValue(val []byte) error {
@@ -155,7 +161,7 @@ func (a *ACS) Output() map[uint64][]byte {
 func (a *ACS) Done() bool {
 	agreementsDone := true
 	for _, bba := range a.bbaInstances {
-		if !bba.done {
+		if !bba.Done() {
 			agreementsDone = false
 		}
 	}
@@ -184,7 +190,7 @@ func (a *ACS) inputValue(data []byte) error {
 	}
 	if output := rbc.Output(); output != nil {
 		a.rbcResults[a.ID] = output
-		a.processAgreement(a.ID, func(bba *BBA) error {
+		return a.processAgreement(a.ID, func(bba *BBA) error {
 			if bba.AcceptInput() {
 				return bba.InputValue(true)
 			}
@@ -255,7 +261,10 @@ func (a *ACS) processAgreement(pid uint64, fun func(bba *BBA) error) error {
 	if !ok {
 		return fmt.Errorf("could not find bba instance for (%d)", pid)
 	}
-	if bba.done {
+	if bba.Done() {
+		if !a.decided {
+			a.tryCompleteAgreement()
+		}
 		return nil
 	}
 	if err := fun(bba); err != nil {
@@ -287,6 +296,10 @@ func (a *ACS) processAgreement(pid uint64, fun func(bba *BBA) error) error {
 				}
 			}
 		}
+	}
+	// Completion can be triggered either by the BBA or the RBC output,
+	// depending on which is completed first. Both variants are possible.
+	if _, ok := a.bbaResults[pid]; ok {
 		a.tryCompleteAgreement()
 	}
 	return nil
@@ -308,8 +321,9 @@ func (a *ACS) tryCompleteAgreement() {
 	}
 	bcResults := make(map[uint64][]byte)
 	for _, id := range nodesThatProvidedTrue {
-		val, _ := a.rbcResults[id]
-		bcResults[id] = val
+		if val, bcOk := a.rbcResults[id]; bcOk {
+			bcResults[id] = val
+		}
 	}
 	if len(nodesThatProvidedTrue) == len(bcResults) {
 		a.output = bcResults

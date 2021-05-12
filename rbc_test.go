@@ -1,13 +1,17 @@
 package hbbft
 
 import (
+	"bytes"
+	"fmt"
 	"log"
+	"math/rand"
 	"sync"
 	"testing"
 
 	"github.com/klauspost/reedsolomon"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Test RBC where 1 node will not provide its value. We use 4 nodes that will
@@ -153,6 +157,99 @@ func TestMakeProofRequests(t *testing.T) {
 	for _, r := range reqs {
 		assert.True(t, validateProof(r))
 	}
+}
+
+// This test should be run repeatedly for some time.
+func TestRBCRandomized(t *testing.T) {
+	if err := testRBCRandomized(t); err != nil {
+		t.Fatalf("Failed, reason=%+v", err)
+	}
+}
+func testRBCRandomized(t *testing.T) error {
+	var err error
+	var N, T = 7, 5
+
+	msgs := make([]*testRBCMsg, 0)
+	nodes := make([]uint64, N)
+	for n := range nodes {
+		nodes[n] = uint64(n)
+	}
+
+	cfg := make([]Config, N)
+	for i := range cfg {
+		cfg[i] = Config{
+			N:         N,
+			F:         N - T,
+			ID:        uint64(i),
+			Nodes:     nodes,
+			BatchSize: 21254, // Should be unused.
+		}
+	}
+
+	var input [10]byte
+	rand.Read(input[:])
+
+	rbc := make([]*RBC, N)
+	proposerID := uint64(rand.Intn(N))
+	for i := range rbc {
+		rbc[i] = NewRBC(cfg[i], proposerID)
+	}
+	var inMsgs []*BroadcastMessage
+	if inMsgs, err = rbc[proposerID].InputValue(input[:]); err != nil {
+		return fmt.Errorf("Failed to process RBC.InputValue: %v", err)
+	}
+	msgs = appendTestBBAMsgsExplicit(inMsgs, proposerID, nodes, msgs)
+
+	for len(msgs) != 0 {
+		m := rand.Intn(len(msgs))
+		msg := msgs[m]
+		msgTo := msg.to
+		if err = rbc[msgTo].HandleMessage(msg.from, msg.msg); err != nil {
+			return fmt.Errorf("Failed to RBC.HandleMessage: %v", err)
+		}
+
+		// Remove the message from the buffer and add the new messages.
+		msgs[m] = msgs[len(msgs)-1]
+		msgs = msgs[:len(msgs)-1]
+		msgs = appendTestBBAMsgsBroadcast(rbc[msgTo].Messages(), msgTo, nodes, msgs)
+	}
+
+	for i := range rbc {
+		out := rbc[i].Output()
+		require.NotNil(t, out)
+		require.Equal(t, bytes.Compare(input[:], out[:len(input)]), 0) // RBC adds zeros to the end.
+		rbc[i].stop()
+	}
+	return nil
+}
+
+type testRBCMsg struct {
+	from uint64
+	to   uint64
+	msg  *BroadcastMessage
+}
+
+func appendTestBBAMsgsExplicit(msgs []*BroadcastMessage, senderID uint64, nodes []uint64, buf []*testRBCMsg) []*testRBCMsg {
+	output := buf[:]
+	msgPos := 0
+	for n := range nodes {
+		if nodes[n] != senderID {
+			output = append(output, &testRBCMsg{from: senderID, to: nodes[n], msg: msgs[msgPos]})
+			msgPos++
+		}
+	}
+	return output
+}
+func appendTestBBAMsgsBroadcast(msgs []*BroadcastMessage, senderID uint64, nodes []uint64, buf []*testRBCMsg) []*testRBCMsg {
+	output := buf[:]
+	for n := range nodes {
+		if nodes[n] != senderID {
+			for m := range msgs {
+				output = append(output, &testRBCMsg{from: senderID, to: nodes[n], msg: msgs[m]})
+			}
+		}
+	}
+	return output
 }
 
 type bcResult struct {

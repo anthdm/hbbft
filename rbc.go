@@ -20,9 +20,8 @@ type BroadcastMessage struct {
 // ProofRequest holds the RootHash along with the Shard of the erasure encoded
 // payload.
 type ProofRequest struct {
-	RootHash []byte
-	// Proof[0] will containt the actual data.
-	Proof         [][]byte
+	RootHash      []byte
+	Proof         [][]byte // Proof[0] will containt the actual data.
 	Index, Leaves int
 }
 
@@ -52,9 +51,9 @@ type RBC struct {
 	// The reedsolomon encoder to encode the proposed value into shards.
 	enc reedsolomon.Encoder
 	// recvReadys is a mapping between the sender and the root hash that was
-	// inluded in the ReadyRequest.
+	// included in the ReadyRequest.
 	recvReadys map[uint64][]byte
-	// revcEchos is a mapping between the sender and the EchoRequest.
+	// recvEchos is a mapping between the sender and the EchoRequest.
 	recvEchos map[uint64]*EchoRequest
 	// Number of the parity and data shards that will be used for erasure encoding
 	// the given value.
@@ -137,8 +136,8 @@ func (r *RBC) InputValue(data []byte) ([]*BroadcastMessage, error) {
 }
 
 // HandleMessage will process the given rpc message and will return a possible
-// outcome. The caller is resposible to make sure only RPC messages are passed
-// that are elligible for the RBC protocol.
+// outcome. The caller is responsible to make sure only RPC messages are passed
+// that are eligible for the RBC protocol.
 func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
 	t := rbcMessageTuple{
 		senderID: senderID,
