@@ -157,12 +157,17 @@ func (a *ACS) Output() map[uint64][]byte {
 }
 
 // Done returns true whether ACS has completed its agreements and cleared its
-// messageQue.
+// messageQue. It is possible that the BBA part will decide before the RBC.
 func (a *ACS) Done() bool {
 	agreementsDone := true
-	for _, bba := range a.bbaInstances {
+	for i, bba := range a.bbaInstances {
 		if !bba.Done() {
 			agreementsDone = false
+			break
+		}
+		if a.rbcResults[i] == nil {
+			agreementsDone = false
+			break
 		}
 	}
 	return agreementsDone && a.messageQue.len() == 0
