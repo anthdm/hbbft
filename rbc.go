@@ -148,7 +148,7 @@ func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
 	return <-t.err
 }
 
-func (r *RBC) stop() {
+func (r *RBC) Stop() {
 	close(r.closeCh)
 }
 

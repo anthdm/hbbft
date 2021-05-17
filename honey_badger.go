@@ -215,13 +215,7 @@ func (hb *HoneyBadger) removeOldEpochs(epoch uint64) {
 		if i >= hb.epoch-1 {
 			continue
 		}
-		for _, t := range acs.bbaInstances {
-			t.Stop()
-		}
-		for _, t := range acs.rbcInstances {
-			t.stop()
-		}
-		acs.stop()
+		acs.Stop()
 		delete(hb.acsInstances, i)
 	}
 }

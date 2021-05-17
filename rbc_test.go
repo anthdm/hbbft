@@ -218,7 +218,7 @@ func testRBCRandomized(t *testing.T) error {
 		out := rbc[i].Output()
 		require.NotNil(t, out)
 		require.Equal(t, bytes.Compare(input[:], out[:len(input)]), 0) // RBC adds zeros to the end.
-		rbc[i].stop()
+		rbc[i].Stop()
 	}
 	return nil
 }

@@ -205,8 +205,14 @@ func (a *ACS) inputValue(data []byte) error {
 	return nil
 }
 
-func (a *ACS) stop() {
+func (a *ACS) Stop() {
 	close(a.closeCh)
+	for _, rbc := range a.rbcInstances {
+		rbc.Stop()
+	}
+	for _, bba := range a.bbaInstances {
+		bba.Stop()
+	}
 }
 
 func (a *ACS) run() {

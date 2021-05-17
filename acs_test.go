@@ -179,7 +179,7 @@ func testACSRandomized(t *testing.T) error {
 		for i := range out0 {
 			require.Equal(t, bytes.Compare(out0[i], outA[i]), 0)
 		}
-		acs[a].stop()
+		acs[a].Stop()
 	}
 	return nil
 }
