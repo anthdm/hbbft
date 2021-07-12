@@ -41,7 +41,7 @@ func TestAgreementGoodNodes(t *testing.T) {
 }
 
 func TestBBAStepByStep(t *testing.T) {
-	bba := NewBBA(Config{N: 4, ID: 0})
+	bba := NewBBA(Config{N: 4, ID: 0}, 0)
 
 	// Set our input value.
 	assert.Nil(t, bba.InputValue(true))
@@ -83,7 +83,7 @@ func TestBBAStepByStep(t *testing.T) {
 
 func TestNewBBA(t *testing.T) {
 	cfg := Config{N: 4}
-	bba := NewBBA(cfg)
+	bba := NewBBA(cfg, 0)
 	assert.Equal(t, 0, len(bba.binValues))
 	assert.Equal(t, 0, len(bba.recvBvalT))
 	assert.Equal(t, 0, len(bba.recvBvalF))
@@ -96,7 +96,7 @@ func TestNewBBA(t *testing.T) {
 
 func TestAdvanceEpochInBBA(t *testing.T) {
 	cfg := Config{N: 4}
-	bba := NewBBA(cfg)
+	bba := NewBBA(cfg, 0)
 	bba.epoch = 8
 	bba.binValues = []bool{false, true, true}
 	bba.sentBvals = []bool{false, true}
@@ -182,7 +182,7 @@ func excludeID(ids []uint64, id uint64) []uint64 {
 func makeBBAInstances(n int) []*BBA {
 	bbas := make([]*BBA, n)
 	for i := 0; i < n; i++ {
-		bbas[i] = NewBBA(Config{N: n, ID: uint64(i)})
+		bbas[i] = NewBBA(Config{N: n, ID: uint64(i)}, uint64(i))
 	}
 	return bbas
 }
@@ -239,7 +239,7 @@ func testBBARandomized(t *testing.T) error {
 
 	bba := make([]*BBA, N)
 	for i := range bba {
-		bba[i] = NewBBA(cfg[i])
+		bba[i] = NewBBA(cfg[i], nodes[i])
 		if err = bba[i].InputValue(inputs[i]); err != nil {
 			return fmt.Errorf("Failed to process BBA.InputValue: %v", err)
 		}

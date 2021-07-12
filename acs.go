@@ -95,7 +95,7 @@ func NewACS(cfg Config) *ACS {
 	// Create all the instances for the participating nodes
 	for _, id := range cfg.Nodes {
 		acs.rbcInstances[id] = NewRBC(cfg, id)
-		acs.bbaInstances[id] = NewBBA(cfg)
+		acs.bbaInstances[id] = NewBBA(cfg, id)
 	}
 	go acs.run()
 	return acs

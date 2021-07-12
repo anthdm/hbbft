@@ -33,6 +33,13 @@ type AuxRequest struct {
 	Value bool
 }
 
+// CCRequest is not part of the HB protocol. We use it
+// to interact with the CC asynchronously, to avoid blocking
+// and to have a uniform interface from the user of the BBA.
+type CCRequest struct {
+	Payload interface{}
+}
+
 // DoneRequest is not part of the HB protocol, but we use
 // it here to terminate the protocol in a graceful way.
 type DoneRequest struct{}
@@ -43,7 +50,9 @@ type BBA struct {
 	Config
 
 	// Common Coin implementation to use.
-	commonCoin CommonCoin
+	commonCoin      CommonCoin
+	commonCoinAsked bool
+	commonCoinValue *bool
 
 	// Current epoch.
 	epoch uint32
@@ -95,7 +104,7 @@ type BBA struct {
 }
 
 // NewBBA returns a new instance of the Binary Byzantine Agreement.
-func NewBBA(cfg Config) *BBA {
+func NewBBA(cfg Config, nodeID uint64) *BBA {
 	if cfg.F == 0 {
 		cfg.F = (cfg.N - 1) / 3
 	}
@@ -107,7 +116,9 @@ func NewBBA(cfg Config) *BBA {
 	}
 	bba := &BBA{
 		Config:          cfg,
-		commonCoin:      cc,
+		commonCoin:      cc.ForNodeID(nodeID),
+		commonCoinAsked: false,
+		commonCoinValue: nil,
 		recvBvalT:       make(map[uint64]bool),
 		recvBvalF:       make(map[uint64]bool),
 		recvAux:         make(map[uint64]bool),
@@ -279,6 +290,8 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 		return b.handleBvalRequest(senderID, t.Value)
 	case *AuxRequest:
 		return b.handleAuxRequest(senderID, t.Value)
+	case *CCRequest:
+		return b.handleCCRequest(t.Payload)
 	default:
 		return fmt.Errorf("unknown BBA message received: %v", t)
 	}
@@ -287,6 +300,9 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 // handleBvalRequest processes the received binary value and fills up the
 // message que if there are any messages that need to be broadcasted.
 func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
+	if b.commonCoinAsked {
+		return nil
+	}
 	b.addRecvBval(senderID, val)
 	lenBval := b.countRecvBvals(val)
 
@@ -300,7 +316,9 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 		// may only occur once per epoch.
 		if wasEmptyBinValues {
 			b.addMessage(NewAgreementMessage(int(b.epoch), &AuxRequest{val}))
-			b.handleAuxRequest(b.ID, val)
+			if err := b.handleAuxRequest(b.ID, val); err != nil {
+				return err
+			}
 		}
 	}
 	// When receiving input(b) messages from f + 1 nodes, if inputs(b) is not
@@ -315,11 +333,28 @@ func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
 }
 
 func (b *BBA) handleAuxRequest(senderID uint64, val bool) error {
+	if b.commonCoinAsked {
+		return nil
+	}
 	if _, ok := b.recvAux[senderID]; ok {
 		// Only a single aux can be received from a peer.
 		return fmt.Errorf("aux already received, recvNode=%v, epoch=%v, aux=%+v, new %v->%v", b.ID, b.epoch, b.recvAux, senderID, val)
 	}
 	b.recvAux[senderID] = val
+	return b.tryOutputAgreement()
+}
+
+func (b *BBA) handleCCRequest(payload interface{}) error {
+	coin, outPayloads, err := b.commonCoin.HandleRequest(b.epoch, payload)
+	if err != nil {
+		return err
+	}
+	if err := b.sendCC(outPayloads); err != nil {
+		return err
+	}
+	if b.commonCoinValue == nil {
+		b.commonCoinValue = coin
+	}
 	return b.tryOutputAgreement()
 }
 
@@ -344,7 +379,24 @@ func (b *BBA) tryOutputAgreement() error {
 		return nil
 	}
 
-	coin := b.commonCoin.FlipCoin(b.epoch)
+	if !b.commonCoinAsked {
+		maybeCoin, ccPayloads, err := b.commonCoin.StartCoinFlip(b.epoch)
+		if err != nil {
+			return err
+		}
+		if err := b.sendCC(ccPayloads); err != nil {
+			return err
+		}
+		b.commonCoinAsked = true
+		if b.commonCoinValue == nil {
+			b.commonCoinValue = maybeCoin
+		}
+	}
+	if b.commonCoinValue == nil {
+		// Still waiting for the common coin.
+		return nil
+	}
+	coin := *b.commonCoinValue
 
 	// Continue the BBA until both:
 	// - a value b is output in some epoch r
@@ -369,7 +421,9 @@ func (b *BBA) tryOutputAgreement() error {
 			b.decision = values[0]
 			log.Debugf("id (%d) outputed a decision (%v) after (%d) msgs", b.ID, values[0], b.msgCount)
 			b.msgCount = 0
-			b.sendDone()
+			if err := b.sendDone(); err != nil {
+				return err
+			}
 		}
 	} else {
 		b.estimated = coin
@@ -396,6 +450,13 @@ func (b *BBA) sendBval(val bool) error {
 	return b.handleBvalRequest(b.ID, val)
 }
 
+func (b *BBA) sendCC(outPayloads []interface{}) error {
+	for _, outPayload := range outPayloads {
+		b.addMessage(NewAgreementMessage(int(b.epoch), &CCRequest{Payload: outPayload}))
+	}
+	return nil
+}
+
 func (b *BBA) sendDone() error {
 	if _, ok := b.recvDone[b.ID]; ok {
 		return nil
@@ -412,6 +473,8 @@ func (b *BBA) advanceEpoch() {
 	b.recvAux = make(map[uint64]bool)
 	b.recvBvalT = make(map[uint64]bool)
 	b.recvBvalF = make(map[uint64]bool)
+	b.commonCoinAsked = false
+	b.commonCoinValue = nil
 	b.epoch++
 }
 
