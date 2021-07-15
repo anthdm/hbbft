@@ -258,8 +258,8 @@ func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) error {
 		return fmt.Errorf(
 			"received invalid proof from (%d) my id (%d)", senderID, r.ID)
 	}
-
 	r.recvEchos[senderID] = req
+
 	if r.readySent || r.countEchos(req.RootHash) < r.N-r.F {
 		return r.tryDecodeValue(req.RootHash)
 	}
@@ -282,10 +282,11 @@ func (r *RBC) handleReadyRequest(senderID uint64, req *ReadyRequest) error {
 	}
 	r.recvReadys[senderID] = req.RootHash
 
-	if r.countReadys(req.RootHash) == r.F+1 && !r.readySent {
+	if !r.readySent && r.countReadys(req.RootHash) == r.F+1 {
 		r.readySent = true
 		ready := &ReadyRequest{req.RootHash}
 		r.messages = append(r.messages, &BroadcastMessage{ready})
+		return r.handleReadyRequest(r.ID, ready)
 	}
 	return r.tryDecodeValue(req.RootHash)
 }
@@ -298,7 +299,6 @@ func (r *RBC) tryDecodeValue(hash []byte) error {
 	}
 	// At this point we can decode the shards. First we create a new slice of
 	// only sortable proof values.
-	r.outputDecoded = true
 	var prfs proofs
 	for _, echo := range r.recvEchos {
 		prfs = append(prfs, echo.ProofRequest)
@@ -311,13 +311,17 @@ func (r *RBC) tryDecodeValue(hash []byte) error {
 		shards[p.Index] = p.Proof[0]
 	}
 	if err := r.enc.Reconstruct(shards); err != nil {
-		return nil
+		if err == reedsolomon.ErrTooFewShards {
+			return nil
+		}
+		return err
 	}
 	var value []byte
 	for _, data := range shards[:r.numDataShards] {
 		value = append(value, data...)
 	}
 	r.output = value
+	r.outputDecoded = true
 	return nil
 }
 
@@ -325,7 +329,7 @@ func (r *RBC) tryDecodeValue(hash []byte) error {
 func (r *RBC) countEchos(hash []byte) int {
 	n := 0
 	for _, e := range r.recvEchos {
-		if bytes.Compare(hash, e.RootHash) == 0 {
+		if bytes.Equal(hash, e.RootHash) {
 			n++
 		}
 	}
@@ -336,7 +340,7 @@ func (r *RBC) countEchos(hash []byte) int {
 func (r *RBC) countReadys(hash []byte) int {
 	n := 0
 	for _, h := range r.recvReadys {
-		if bytes.Compare(hash, h) == 0 {
+		if bytes.Equal(hash, h) {
 			n++
 		}
 	}
@@ -349,7 +353,9 @@ func makeProofRequests(shards [][]byte) ([]*ProofRequest, error) {
 	reqs := make([]*ProofRequest, len(shards))
 	for i := 0; i < len(reqs); i++ {
 		tree := merkletree.New(sha256.New())
-		tree.SetIndex(uint64(i))
+		if err := tree.SetIndex(uint64(i)); err != nil {
+			return nil, err
+		}
 		for i := 0; i < len(shards); i++ {
 			tree.Push(shards[i])
 		}
@@ -370,7 +376,9 @@ func makeBroadcastMessages(shards [][]byte) ([]*BroadcastMessage, error) {
 	msgs := make([]*BroadcastMessage, len(shards))
 	for i := 0; i < len(msgs); i++ {
 		tree := merkletree.New(sha256.New())
-		tree.SetIndex(uint64(i))
+		if err := tree.SetIndex(uint64(i)); err != nil {
+			return nil, err
+		}
 		for i := 0; i < len(shards); i++ {
 			tree.Push(shards[i])
 		}

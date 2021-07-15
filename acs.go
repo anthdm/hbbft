@@ -64,9 +64,7 @@ type (
 	}
 
 	acsInputResponse struct {
-		rbcMessages []*BroadcastMessage
-		acsMessages []*ACSMessage
-		err         error
+		err error
 	}
 
 	acsInputTuple struct {
@@ -99,6 +97,11 @@ func NewACS(cfg Config) *ACS {
 	}
 	go acs.run()
 	return acs
+}
+
+// DebugInfo returns internal state. Should be used for debugging only.
+func (a *ACS) DebugInfo() (map[uint64]*RBC, map[uint64]*BBA, map[uint64][]byte, map[uint64]bool, []MessageTuple) { // TODO: ...
+	return a.rbcInstances, a.bbaInstances, a.rbcResults, a.bbaResults, a.messageQue.que
 }
 
 // Messages returns all the internal messages from the message que. Note that
