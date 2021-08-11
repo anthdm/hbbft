@@ -168,7 +168,7 @@ func (a *ACS) Done() bool {
 			agreementsDone = false
 			break
 		}
-		if a.rbcResults[i] == nil {
+		if a.bbaResults[i] && a.rbcResults[i] == nil {
 			agreementsDone = false
 			break
 		}
