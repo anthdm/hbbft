@@ -96,10 +96,12 @@ func NewRBC(cfg Config, proposerID uint64) *RBC {
 	if cfg.F == 0 {
 		cfg.F = (cfg.N - 1) / 3
 	}
-	var (
-		parityShards = 2 * cfg.F
-		dataShards   = cfg.N - parityShards
-	)
+	parityShards := 2 * cfg.F
+	if parityShards == 0 {
+		parityShards = 1
+	}
+	dataShards := cfg.N - parityShards
+
 	enc, err := reedsolomon.New(dataShards, parityShards)
 	if err != nil {
 		panic(err)
