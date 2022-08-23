@@ -70,6 +70,7 @@ func makeNodes(n, ntx, txsize, batchSize int) []*hbbft.HoneyBadger {
 	for i := 0; i < n; i++ {
 		cfg := hbbft.Config{
 			N:         n,
+			F:         -1,
 			ID:        uint64(i),
 			Nodes:     makeids(n),
 			BatchSize: batchSize,

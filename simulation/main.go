@@ -84,6 +84,7 @@ type Server struct {
 func newServer(id uint64, tr hbbft.Transport, nodes []uint64) *Server {
 	hb := hbbft.NewHoneyBadger(hbbft.Config{
 		N:         len(nodes),
+		F:         -1,
 		ID:        id,
 		Nodes:     nodes,
 		BatchSize: batchSize,

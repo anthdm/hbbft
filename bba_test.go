@@ -41,7 +41,7 @@ func TestAgreementGoodNodes(t *testing.T) {
 }
 
 func TestBBAStepByStep(t *testing.T) {
-	bba := NewBBA(Config{N: 4, ID: 0}, 0)
+	bba := NewBBA(Config{N: 4, F: -1, ID: 0}, 0)
 
 	// Set our input value.
 	assert.Nil(t, bba.InputValue(true))
@@ -82,7 +82,7 @@ func TestBBAStepByStep(t *testing.T) {
 }
 
 func TestNewBBA(t *testing.T) {
-	cfg := Config{N: 4}
+	cfg := Config{N: 4, F: -1}
 	bba := NewBBA(cfg, 0)
 	assert.Equal(t, 0, len(bba.binValues))
 	assert.Equal(t, 0, len(bba.recvBvalT))
@@ -95,7 +95,7 @@ func TestNewBBA(t *testing.T) {
 }
 
 func TestAdvanceEpochInBBA(t *testing.T) {
-	cfg := Config{N: 4}
+	cfg := Config{N: 4, F: -1}
 	bba := NewBBA(cfg, 0)
 	bba.epoch = 8
 	bba.binValues = []bool{false, true, true}
@@ -182,7 +182,7 @@ func excludeID(ids []uint64, id uint64) []uint64 {
 func makeBBAInstances(n int) []*BBA {
 	bbas := make([]*BBA, n)
 	for i := 0; i < n; i++ {
-		bbas[i] = NewBBA(Config{N: n, ID: uint64(i)}, uint64(i))
+		bbas[i] = NewBBA(Config{N: n, F: -1, ID: uint64(i)}, uint64(i))
 	}
 	return bbas
 }

@@ -77,6 +77,7 @@ func TestRBC4GoodNodes(t *testing.T) {
 func TestRBCInputValue(t *testing.T) {
 	rbc := NewRBC(Config{
 		N: 4,
+		F: -1,
 	}, 0)
 	reqs, err := rbc.InputValue([]byte("this is a test string"))
 	assert.Nil(t, err)
@@ -109,7 +110,7 @@ func TestNewReliableBroadcast(t *testing.T) {
 }
 
 func TestRBCOutputIsNilAfterConsuming(t *testing.T) {
-	rbc := NewRBC(Config{N: 4}, 0)
+	rbc := NewRBC(Config{N: 4, F: -1}, 0)
 	output := []byte("a")
 	rbc.output = output
 	assert.Equal(t, output, rbc.Output())
@@ -117,7 +118,7 @@ func TestRBCOutputIsNilAfterConsuming(t *testing.T) {
 }
 
 func TestRBCMessagesIsEmptyAfterConsuming(t *testing.T) {
-	rbc := NewRBC(Config{N: 4}, 0)
+	rbc := NewRBC(Config{N: 4, F: -1}, 0)
 	rbc.messages = []*BroadcastMessage{{}}
 	assert.Equal(t, 1, len(rbc.Messages()))
 	assert.Equal(t, 0, len(rbc.Messages()))
@@ -324,6 +325,7 @@ func makeRBCNodes(n, pid int, resCh chan bcResult) []*testRBCEngine {
 		cfg := Config{
 			ID: uint64(i),
 			N:  len(transports),
+			F:  -1,
 		}
 		nodes[i] = newTestRBCEngine(resCh, NewRBC(cfg, uint64(pid)), tr)
 		go nodes[i].run()

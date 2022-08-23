@@ -41,16 +41,18 @@ make test
 Create a new instance of HoneyBadger.
 
 ```golang
-// Create a Config struct with your prefered settings.
+// Create a Config struct with your preferred settings.
 cfg := hbbft.Config{
     // The number of nodes in the network.
     N: 4,
+    // Number of tolerated faulty nodes, use -1 to take max possible.
+    F: -1,
     // Identifier of this node.
     ID: 101,
     // Identifiers of the participating nodes.
     Nodes: uint64{67, 1, 99, 101},
-    // The prefered batch size. If BatchSize is empty, an ideal batch size will
-    // be choosen for you.
+    // The preferred batch size. If BatchSize is empty, an ideal batch size will
+    // be chosen for you.
     BatchSize: 100,
 }
 

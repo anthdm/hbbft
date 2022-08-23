@@ -93,7 +93,7 @@ type (
 // NewRBC returns a new instance of the ReliableBroadcast configured
 // with the given config
 func NewRBC(cfg Config, proposerID uint64) *RBC {
-	if cfg.F == 0 {
+	if cfg.F == -1 {
 		cfg.F = (cfg.N - 1) / 3
 	}
 	parityShards := 2 * cfg.F

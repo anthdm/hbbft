@@ -105,7 +105,7 @@ type BBA struct {
 
 // NewBBA returns a new instance of the Binary Byzantine Agreement.
 func NewBBA(cfg Config, nodeID uint64) *BBA {
-	if cfg.F == 0 {
+	if cfg.F == -1 {
 		cfg.F = (cfg.N - 1) / 3
 	}
 	var cc CommonCoin

@@ -11,6 +11,7 @@ import (
 func TestEngineAddTransaction(t *testing.T) {
 	cfg := Config{
 		N:     6,
+		F:     -1,
 		ID:    0,
 		Nodes: []uint64{0, 1, 2, 3, 4, 5, 6},
 	}
@@ -75,6 +76,7 @@ func makeTestNodes(n int) []*testNode {
 		cfg := Config{
 			ID:    uint64(i),
 			N:     len(transports),
+			F:     -1,
 			Nodes: makeids(n),
 		}
 		nodes[i] = newTestNode(NewHoneyBadger(cfg), tr)

@@ -76,7 +76,7 @@ type (
 // NewACS returns a new ACS instance configured with the given Config and node
 // ids.
 func NewACS(cfg Config) *ACS {
-	if cfg.F == 0 {
+	if cfg.F == -1 {
 		cfg.F = (cfg.N - 1) / 3
 	}
 	acs := &ACS{

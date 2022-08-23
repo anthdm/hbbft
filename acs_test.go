@@ -82,6 +82,7 @@ func TestNewACS(t *testing.T) {
 		nodes = []uint64{0, 1, 2, 3}
 		acs   = NewACS(Config{
 			N:     len(nodes),
+			F:     -1, // Use default.
 			ID:    id,
 			Nodes: nodes,
 		})
@@ -101,7 +102,7 @@ func TestNewACS(t *testing.T) {
 }
 
 func TestACSOutputIsNilAfterConsuming(t *testing.T) {
-	acs := NewACS(Config{N: 4})
+	acs := NewACS(Config{N: 4, F: -1}) // Use default for F.
 	output := map[uint64][]byte{
 		1: []byte("this is it"),
 	}
@@ -200,7 +201,7 @@ func appendTestMsgs(msgs []MessageTuple, senderID uint64, buf []*testMsg) []*tes
 func makeACSNetwork(n int) []*ACS {
 	network := make([]*ACS, n)
 	for i := 0; i < n; i++ {
-		network[i] = NewACS(Config{N: n, ID: uint64(i), Nodes: makeids(n)})
+		network[i] = NewACS(Config{N: n, F: -1, ID: uint64(i), Nodes: makeids(n)}) // Use default for F.
 		go network[i].run()
 	}
 	return network
