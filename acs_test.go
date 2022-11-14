@@ -1,10 +1,14 @@
 package hbbft
 
 import (
+	"bytes"
+	"fmt"
+	"math/rand"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Test ACS with 4 good nodes. The result should be that at least the output
@@ -78,6 +82,7 @@ func TestNewACS(t *testing.T) {
 		nodes = []uint64{0, 1, 2, 3}
 		acs   = NewACS(Config{
 			N:     len(nodes),
+			F:     -1, // Use default.
 			ID:    id,
 			Nodes: nodes,
 		})
@@ -97,7 +102,7 @@ func TestNewACS(t *testing.T) {
 }
 
 func TestACSOutputIsNilAfterConsuming(t *testing.T) {
-	acs := NewACS(Config{N: 4})
+	acs := NewACS(Config{N: 4, F: -1}) // Use default for F.
 	output := map[uint64][]byte{
 		1: []byte("this is it"),
 	}
@@ -106,15 +111,97 @@ func TestACSOutputIsNilAfterConsuming(t *testing.T) {
 	assert.Nil(t, acs.Output())
 }
 
+// This test checks, if messages sent in any order are still handled correctly.
+// It is expected to run this test multiple times.
+func TestACSRandomized(t *testing.T) {
+	if err := testACSRandomized(t); err != nil {
+		t.Fatalf("Failed, reason=%+v", err)
+	}
+}
+func testACSRandomized(t *testing.T) error {
+	var err error
+	var N, T = 7, 5
+
+	msgs := make([]*testMsg, 0)
+	nodes := make([]uint64, N)
+	for n := range nodes {
+		nodes[n] = uint64(n)
+	}
+
+	cfg := make([]Config, N)
+	for i := range cfg {
+		cfg[i] = Config{
+			N:         N,
+			F:         N - T,
+			ID:        uint64(i),
+			Nodes:     nodes,
+			BatchSize: 21254, // Should be unused.
+		}
+
+	}
+
+	acs := make([]*ACS, N)
+	for a := range acs {
+		acs[a] = NewACS(cfg[a])
+		if err = acs[a].InputValue([]byte{1, 2, byte(a)}); err != nil {
+			return fmt.Errorf("Failed to process ACS.InputValue: %+v", err)
+		}
+		msgs = appendTestMsgs(acs[a].Messages(), nodes[a], msgs)
+	}
+
+	// var done bool
+	for len(msgs) != 0 {
+		m := rand.Intn(len(msgs))
+		msg := msgs[m]
+
+		msgTo := msg.msg.To
+		if acsMsg, ok := msg.msg.Payload.(*ACSMessage); ok {
+			if err = acs[msgTo].HandleMessage(uint64(msg.from), acsMsg); err != nil {
+				return fmt.Errorf("Failed to ACS.HandleMessage: %+v", err)
+			}
+		} else {
+			return fmt.Errorf("Unexpected message type: %+v", msg.msg.Payload)
+		}
+
+		// Remove the message from the buffer and append the new messages, if any.
+		msgs[m] = msgs[len(msgs)-1]
+		msgs = msgs[:len(msgs)-1]
+		msgs = appendTestMsgs(acs[msgTo].Messages(), nodes[msgTo], msgs)
+	}
+
+	out0 := acs[0].Output()
+	for a := range acs {
+		require.True(t, acs[a].Done())
+		if a == 0 {
+			continue
+		}
+		var outA map[uint64][]byte = acs[a].Output()
+		require.Equal(t, len(out0), len(outA))
+		for i := range out0 {
+			require.Equal(t, bytes.Compare(out0[i], outA[i]), 0)
+		}
+		acs[a].Stop()
+	}
+	return nil
+}
+
 type testMsg struct {
 	from uint64
 	msg  MessageTuple
 }
 
+func appendTestMsgs(msgs []MessageTuple, senderID uint64, buf []*testMsg) []*testMsg {
+	output := buf[:]
+	for m := range msgs {
+		output = append(output, &testMsg{from: senderID, msg: msgs[m]})
+	}
+	return output
+}
+
 func makeACSNetwork(n int) []*ACS {
 	network := make([]*ACS, n)
 	for i := 0; i < n; i++ {
-		network[i] = NewACS(Config{N: n, ID: uint64(i), Nodes: makeids(n)})
+		network[i] = NewACS(Config{N: n, F: -1, ID: uint64(i), Nodes: makeids(n)}) // Use default for F.
 		go network[i].run()
 	}
 	return network

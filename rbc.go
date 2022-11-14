@@ -20,9 +20,8 @@ type BroadcastMessage struct {
 // ProofRequest holds the RootHash along with the Shard of the erasure encoded
 // payload.
 type ProofRequest struct {
-	RootHash []byte
-	// Proof[0] will containt the actual data.
-	Proof         [][]byte
+	RootHash      []byte
+	Proof         [][]byte // Proof[0] will containt the actual data.
 	Index, Leaves int
 }
 
@@ -52,9 +51,9 @@ type RBC struct {
 	// The reedsolomon encoder to encode the proposed value into shards.
 	enc reedsolomon.Encoder
 	// recvReadys is a mapping between the sender and the root hash that was
-	// inluded in the ReadyRequest.
+	// included in the ReadyRequest.
 	recvReadys map[uint64][]byte
-	// revcEchos is a mapping between the sender and the EchoRequest.
+	// recvEchos is a mapping between the sender and the EchoRequest.
 	recvEchos map[uint64]*EchoRequest
 	// Number of the parity and data shards that will be used for erasure encoding
 	// the given value.
@@ -94,13 +93,15 @@ type (
 // NewRBC returns a new instance of the ReliableBroadcast configured
 // with the given config
 func NewRBC(cfg Config, proposerID uint64) *RBC {
-	if cfg.F == 0 {
+	if cfg.F == -1 {
 		cfg.F = (cfg.N - 1) / 3
 	}
-	var (
-		parityShards = 2 * cfg.F
-		dataShards   = cfg.N - parityShards
-	)
+	parityShards := 2 * cfg.F
+	if parityShards == 0 {
+		parityShards = 1
+	}
+	dataShards := cfg.N - parityShards
+
 	enc, err := reedsolomon.New(dataShards, parityShards)
 	if err != nil {
 		panic(err)
@@ -137,8 +138,8 @@ func (r *RBC) InputValue(data []byte) ([]*BroadcastMessage, error) {
 }
 
 // HandleMessage will process the given rpc message and will return a possible
-// outcome. The caller is resposible to make sure only RPC messages are passed
-// that are elligible for the RBC protocol.
+// outcome. The caller is responsible to make sure only RPC messages are passed
+// that are eligible for the RBC protocol.
 func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
 	t := rbcMessageTuple{
 		senderID: senderID,
@@ -149,7 +150,7 @@ func (r *RBC) HandleMessage(senderID uint64, msg *BroadcastMessage) error {
 	return <-t.err
 }
 
-func (r *RBC) stop() {
+func (r *RBC) Stop() {
 	close(r.closeCh)
 }
 
@@ -259,8 +260,8 @@ func (r *RBC) handleEchoRequest(senderID uint64, req *EchoRequest) error {
 		return fmt.Errorf(
 			"received invalid proof from (%d) my id (%d)", senderID, r.ID)
 	}
-
 	r.recvEchos[senderID] = req
+
 	if r.readySent || r.countEchos(req.RootHash) < r.N-r.F {
 		return r.tryDecodeValue(req.RootHash)
 	}
@@ -283,10 +284,11 @@ func (r *RBC) handleReadyRequest(senderID uint64, req *ReadyRequest) error {
 	}
 	r.recvReadys[senderID] = req.RootHash
 
-	if r.countReadys(req.RootHash) == r.F+1 && !r.readySent {
+	if !r.readySent && r.countReadys(req.RootHash) == r.F+1 {
 		r.readySent = true
 		ready := &ReadyRequest{req.RootHash}
 		r.messages = append(r.messages, &BroadcastMessage{ready})
+		return r.handleReadyRequest(r.ID, ready)
 	}
 	return r.tryDecodeValue(req.RootHash)
 }
@@ -299,7 +301,6 @@ func (r *RBC) tryDecodeValue(hash []byte) error {
 	}
 	// At this point we can decode the shards. First we create a new slice of
 	// only sortable proof values.
-	r.outputDecoded = true
 	var prfs proofs
 	for _, echo := range r.recvEchos {
 		prfs = append(prfs, echo.ProofRequest)
@@ -312,13 +313,17 @@ func (r *RBC) tryDecodeValue(hash []byte) error {
 		shards[p.Index] = p.Proof[0]
 	}
 	if err := r.enc.Reconstruct(shards); err != nil {
-		return nil
+		if err == reedsolomon.ErrTooFewShards {
+			return nil
+		}
+		return err
 	}
 	var value []byte
 	for _, data := range shards[:r.numDataShards] {
 		value = append(value, data...)
 	}
 	r.output = value
+	r.outputDecoded = true
 	return nil
 }
 
@@ -326,7 +331,7 @@ func (r *RBC) tryDecodeValue(hash []byte) error {
 func (r *RBC) countEchos(hash []byte) int {
 	n := 0
 	for _, e := range r.recvEchos {
-		if bytes.Compare(hash, e.RootHash) == 0 {
+		if bytes.Equal(hash, e.RootHash) {
 			n++
 		}
 	}
@@ -337,7 +342,7 @@ func (r *RBC) countEchos(hash []byte) int {
 func (r *RBC) countReadys(hash []byte) int {
 	n := 0
 	for _, h := range r.recvReadys {
-		if bytes.Compare(hash, h) == 0 {
+		if bytes.Equal(hash, h) {
 			n++
 		}
 	}
@@ -350,7 +355,9 @@ func makeProofRequests(shards [][]byte) ([]*ProofRequest, error) {
 	reqs := make([]*ProofRequest, len(shards))
 	for i := 0; i < len(reqs); i++ {
 		tree := merkletree.New(sha256.New())
-		tree.SetIndex(uint64(i))
+		if err := tree.SetIndex(uint64(i)); err != nil {
+			return nil, err
+		}
 		for i := 0; i < len(shards); i++ {
 			tree.Push(shards[i])
 		}
@@ -371,7 +378,9 @@ func makeBroadcastMessages(shards [][]byte) ([]*BroadcastMessage, error) {
 	msgs := make([]*BroadcastMessage, len(shards))
 	for i := 0; i < len(msgs); i++ {
 		tree := merkletree.New(sha256.New())
-		tree.SetIndex(uint64(i))
+		if err := tree.SetIndex(uint64(i)); err != nil {
+			return nil, err
+		}
 		for i := 0; i < len(shards); i++ {
 			tree.Push(shards[i])
 		}

@@ -1,13 +1,17 @@
 package hbbft
 
 import (
+	"bytes"
+	"fmt"
 	"log"
+	"math/rand"
 	"sync"
 	"testing"
 
 	"github.com/klauspost/reedsolomon"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Test RBC where 1 node will not provide its value. We use 4 nodes that will
@@ -73,6 +77,7 @@ func TestRBC4GoodNodes(t *testing.T) {
 func TestRBCInputValue(t *testing.T) {
 	rbc := NewRBC(Config{
 		N: 4,
+		F: -1,
 	}, 0)
 	reqs, err := rbc.InputValue([]byte("this is a test string"))
 	assert.Nil(t, err)
@@ -105,7 +110,7 @@ func TestNewReliableBroadcast(t *testing.T) {
 }
 
 func TestRBCOutputIsNilAfterConsuming(t *testing.T) {
-	rbc := NewRBC(Config{N: 4}, 0)
+	rbc := NewRBC(Config{N: 4, F: -1}, 0)
 	output := []byte("a")
 	rbc.output = output
 	assert.Equal(t, output, rbc.Output())
@@ -113,8 +118,8 @@ func TestRBCOutputIsNilAfterConsuming(t *testing.T) {
 }
 
 func TestRBCMessagesIsEmptyAfterConsuming(t *testing.T) {
-	rbc := NewRBC(Config{N: 4}, 0)
-	rbc.messages = []*BroadcastMessage{&BroadcastMessage{}}
+	rbc := NewRBC(Config{N: 4, F: -1}, 0)
+	rbc.messages = []*BroadcastMessage{{}}
 	assert.Equal(t, 1, len(rbc.Messages()))
 	assert.Equal(t, 0, len(rbc.Messages()))
 }
@@ -155,6 +160,98 @@ func TestMakeProofRequests(t *testing.T) {
 	}
 }
 
+// This test should be run repeatedly for some time.
+func TestRBCRandomized(t *testing.T) {
+	if err := testRBCRandomized(t); err != nil {
+		t.Fatalf("Failed, reason=%+v", err)
+	}
+}
+func testRBCRandomized(t *testing.T) error {
+	var err error
+	var N, T = 7, 5
+
+	msgs := make([]*testRBCMsg, 0)
+	nodes := make([]uint64, N)
+	for n := range nodes {
+		nodes[n] = uint64(n)
+	}
+
+	cfg := make([]Config, N)
+	for i := range cfg {
+		cfg[i] = Config{
+			N:         N,
+			F:         N - T,
+			ID:        uint64(i),
+			Nodes:     nodes,
+			BatchSize: 21254, // Should be unused.
+		}
+	}
+
+	var input [10000]byte
+	rand.Read(input[:])
+
+	rbc := make([]*RBC, N)
+	proposerID := uint64(rand.Intn(N))
+	for i := range rbc {
+		rbc[i] = NewRBC(cfg[i], proposerID)
+	}
+	var inMsgs []*BroadcastMessage
+	if inMsgs, err = rbc[proposerID].InputValue(input[:]); err != nil {
+		return fmt.Errorf("Failed to process RBC.InputValue: %v", err)
+	}
+	msgs = appendTestRBCMsgsExplicit(inMsgs, proposerID, nodes, msgs)
+	for len(msgs) != 0 {
+		m := rand.Intn(len(msgs))
+		msg := msgs[m]
+		msgTo := msg.to
+		if err = rbc[msgTo].HandleMessage(msg.from, msg.msg); err != nil {
+			return fmt.Errorf("Failed to RBC.HandleMessage: %v", err)
+		}
+
+		// Remove the message from the buffer and add the new messages.
+		msgs[m] = msgs[len(msgs)-1]
+		msgs = msgs[:len(msgs)-1]
+		msgs = appendTestRBCMsgsBroadcast(rbc[msgTo].Messages(), msgTo, nodes, msgs)
+	}
+
+	for i := range rbc {
+		out := rbc[i].Output()
+		require.NotNil(t, out)
+		require.Equal(t, bytes.Compare(input[:], out[:len(input)]), 0) // RBC adds zeros to the end.
+		rbc[i].Stop()
+	}
+	return nil
+}
+
+type testRBCMsg struct {
+	from uint64
+	to   uint64
+	msg  *BroadcastMessage
+}
+
+func appendTestRBCMsgsExplicit(msgs []*BroadcastMessage, senderID uint64, nodes []uint64, buf []*testRBCMsg) []*testRBCMsg {
+	output := buf[:]
+	msgPos := 0
+	for n := range nodes {
+		if nodes[n] != senderID {
+			output = append(output, &testRBCMsg{from: senderID, to: nodes[n], msg: msgs[msgPos]})
+			msgPos++
+		}
+	}
+	return output
+}
+func appendTestRBCMsgsBroadcast(msgs []*BroadcastMessage, senderID uint64, nodes []uint64, buf []*testRBCMsg) []*testRBCMsg {
+	output := buf[:]
+	for n := range nodes {
+		if nodes[n] != senderID {
+			for m := range msgs {
+				output = append(output, &testRBCMsg{from: senderID, to: nodes[n], msg: msgs[m]})
+			}
+		}
+	}
+	return output
+}
+
 type bcResult struct {
 	nodeID uint64
 	value  []byte
@@ -188,11 +285,13 @@ func (e *testRBCEngine) run() {
 				continue
 			}
 			for _, msg := range e.rbc.Messages() {
-				e.transport.Broadcast(e.rbc.ID, msg)
+				if err := e.transport.Broadcast(e.rbc.ID, msg); err != nil {
+					panic(err)
+				}
 			}
 			if output := e.rbc.Output(); output != nil {
 				// Faulty node will refuse to send its produced output, causing
-				// potential disturb of conensus liveness.
+				// potential disturb of consensus liveness.
 				if e.faulty {
 					continue
 				}
@@ -214,8 +313,7 @@ func (e *testRBCEngine) inputValue(data []byte) error {
 	for i := 0; i < len(reqs); i++ {
 		msgs[i] = reqs[i]
 	}
-	e.transport.SendProofMessages(e.rbc.ID, msgs)
-	return nil
+	return e.transport.SendProofMessages(e.rbc.ID, msgs)
 }
 
 func makeRBCNodes(n, pid int, resCh chan bcResult) []*testRBCEngine {
@@ -227,6 +325,7 @@ func makeRBCNodes(n, pid int, resCh chan bcResult) []*testRBCEngine {
 		cfg := Config{
 			ID: uint64(i),
 			N:  len(transports),
+			F:  -1,
 		}
 		nodes[i] = newTestRBCEngine(resCh, NewRBC(cfg, uint64(pid)), tr)
 		go nodes[i].run()

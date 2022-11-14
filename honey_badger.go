@@ -28,8 +28,10 @@ type Config struct {
 	ID uint64
 	// Identifiers of the participating nodes.
 	Nodes []uint64
-	// Maximum number of transactions that will be comitted in one epoch.
+	// Maximum number of transactions that will be committed in one epoch.
 	BatchSize int
+	// Common Coin to use.
+	CommonCoin CommonCoin
 }
 
 // HoneyBadger represents the top-level protocol of the hbbft consensus.
@@ -213,13 +215,7 @@ func (hb *HoneyBadger) removeOldEpochs(epoch uint64) {
 		if i >= hb.epoch-1 {
 			continue
 		}
-		for _, t := range acs.bbaInstances {
-			t.stop()
-		}
-		for _, t := range acs.rbcInstances {
-			t.stop()
-		}
-		acs.stop()
+		acs.Stop()
 		delete(hb.acsInstances, i)
 	}
 }

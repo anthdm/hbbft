@@ -33,31 +33,66 @@ type AuxRequest struct {
 	Value bool
 }
 
+// CCRequest is not part of the HB protocol. We use it
+// to interact with the CC asynchronously, to avoid blocking
+// and to have a uniform interface from the user of the BBA.
+type CCRequest struct {
+	Payload interface{}
+}
+
+// DoneRequest is not part of the HB protocol, but we use
+// it here to terminate the protocol in a graceful way.
+type DoneRequest struct{}
+
 // BBA is the Binary Byzantine Agreement build from a common coin protocol.
 type BBA struct {
 	// Config holds the BBA configuration.
 	Config
+
+	// Common Coin implementation to use.
+	commonCoin      CommonCoin
+	commonCoinAsked bool
+	commonCoinValue *bool
+
 	// Current epoch.
 	epoch uint32
-	//  Bval requests we accepted this epoch.
-	binValues []bool
-	// sentBvals are the binary values this instance sent.
-	sentBvals []bool
-	// recvBval is a mapping of the sender and the receveived binary value.
-	recvBval map[uint64]bool
-	// recvAux is a mapping of the sender and the receveived Aux value.
-	recvAux map[uint64]bool
-	// Whether this bba is terminated or not.
-	done bool
-	// output and estimated of the bba protocol. This can be either nil or a
-	// boolean.
-	output, estimated, decision interface{}
-	//delayedMessages are messages that are received by a node that is already
-	// in a later epoch. These messages will be qued an handled the next epoch.
-	delayedMessages []delayedMessage
 
+	// Bval requests we accepted this epoch (received from a quorum).
+	binValues []bool
+
+	// sentBvals are the binary values this instance sent in this epoch.
+	sentBvals []bool
+
+	// recvBval is a mapping of the sender and the received binary value.
+	// We need to collect both values, because each node can send several
+	// different bval messages in a single round.
+	recvBvalT map[uint64]bool
+	recvBvalF map[uint64]bool
+
+	// recvAux is a mapping of the sender and the received Aux value.
+	recvAux map[uint64]bool
+
+	// recvDone contains received info, on which epoch which peer has decided.
+	recvDone map[uint64]uint32
+
+	// Whether this bba is terminated or not.
+	// It can have an output, but should be still running,
+	// because it has to help other peers to decide.
+	done bool
+
+	// output and estimated of the bba protocol.
+	// This can be either nil or a boolean.
+	// The decision is kept permanently, while the output is cleared on first fetch.
+	output, estimated, decision interface{}
+
+	//delayedMessages are messages that are received by a node that is already
+	// in a later epoch. These messages will be queued an handled the next epoch.
+	delayedMessages []*delayedMessage
+
+	// For all the external access, like Done, Output, etc.
 	lock sync.RWMutex
-	// Que of AgreementMessages that need to be broadcasted after each received
+
+	// Queue of AgreementMessages that need to be broadcasted after each received
 	// message.
 	messages []*AgreementMessage
 
@@ -69,21 +104,32 @@ type BBA struct {
 }
 
 // NewBBA returns a new instance of the Binary Byzantine Agreement.
-func NewBBA(cfg Config) *BBA {
-	if cfg.F == 0 {
+func NewBBA(cfg Config, nodeID uint64) *BBA {
+	if cfg.F == -1 {
 		cfg.F = (cfg.N - 1) / 3
+	}
+	var cc CommonCoin
+	if cfg.CommonCoin != nil {
+		cc = cfg.CommonCoin
+	} else {
+		cc = NewFakeCoin() // Use it by default to avoid breaking changes in the API.
 	}
 	bba := &BBA{
 		Config:          cfg,
-		recvBval:        make(map[uint64]bool),
+		commonCoin:      cc.ForNodeID(nodeID),
+		commonCoinAsked: false,
+		commonCoinValue: nil,
+		recvBvalT:       make(map[uint64]bool),
+		recvBvalF:       make(map[uint64]bool),
 		recvAux:         make(map[uint64]bool),
+		recvDone:        make(map[uint64]uint32),
 		sentBvals:       []bool{},
 		binValues:       []bool{},
 		closeCh:         make(chan struct{}),
 		inputCh:         make(chan bbaInputTuple),
 		messageCh:       make(chan bbaMessageTuple),
 		messages:        []*AgreementMessage{},
-		delayedMessages: []delayedMessage{},
+		delayedMessages: []*delayedMessage{},
 	}
 	go bba.run()
 	return bba
@@ -120,8 +166,8 @@ func (b *BBA) InputValue(val bool) error {
 	return <-t.err
 }
 
-// HandleMessage will process the given rpc message. The caller is resposible to
-// make sure only RPC messages are passed that are elligible for the BBA protocol.
+// HandleMessage will process the given rpc message. The caller is responsible to
+// make sure only RPC messages are passed that are eligible for the BBA protocol.
 func (b *BBA) HandleMessage(senderID uint64, msg *AgreementMessage) error {
 	b.msgCount++
 	t := bbaMessageTuple{
@@ -133,7 +179,7 @@ func (b *BBA) HandleMessage(senderID uint64, msg *AgreementMessage) error {
 	return <-t.err
 }
 
-// AcceptInput returns true whether this bba instance is elligable for accepting
+// AcceptInput returns true whether this bba instance is eligable for accepting
 // a new input value.
 func (b *BBA) AcceptInput() bool {
 	return b.epoch == 0 && b.estimated == nil
@@ -143,7 +189,9 @@ func (b *BBA) AcceptInput() bool {
 // then it will return the output else nil. Note that after consuming the output
 // its will be set to nil forever.
 func (b *BBA) Output() interface{} {
-	if b.output != nil {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	if b.done && b.output != nil {
 		out := b.output
 		b.output = nil
 		return out
@@ -155,23 +203,31 @@ func (b *BBA) Output() interface{} {
 // processing a protocol message. After calling this method the que will
 // be empty. Hence calling Messages can only occur once in a single roundtrip.
 func (b *BBA) Messages() []*AgreementMessage {
-	b.lock.RLock()
-	msgs := b.messages
-	b.lock.RUnlock()
-
 	b.lock.Lock()
 	defer b.lock.Unlock()
+	msgs := b.messages
 	b.messages = []*AgreementMessage{}
 	return msgs
 }
 
+// addMessage adds single message to be broadcasted.
+// The actual recipients are set in the ACS part.
 func (b *BBA) addMessage(msg *AgreementMessage) {
 	b.lock.Lock()
 	defer b.lock.Unlock()
 	b.messages = append(b.messages, msg)
 }
 
-func (b *BBA) stop() {
+// Done indicates, if the process is already decided and can be terminated.
+// It can be so that the BBA has decided, but needs to support other peers to decide.
+func (b *BBA) Done() bool {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	return b.done
+}
+
+// Stop the BBA thread.
+func (b *BBA) Stop() {
 	close(b.closeCh)
 }
 
@@ -182,10 +238,14 @@ func (b *BBA) run() {
 		select {
 		case <-b.closeCh:
 			return
-		case t := <-b.inputCh:
-			t.err <- b.inputValue(t.value)
-		case t := <-b.messageCh:
-			t.err <- b.handleMessage(t.senderID, t.msg)
+		case t, ok := <-b.inputCh:
+			if ok {
+				t.err <- b.inputValue(t.value)
+			}
+		case t, ok := <-b.messageCh:
+			if ok {
+				t.err <- b.handleMessage(t.senderID, t.msg)
+			}
 		}
 	}
 }
@@ -193,19 +253,21 @@ func (b *BBA) run() {
 // inputValue will set the given val as the initial value to be proposed in the
 // Agreement.
 func (b *BBA) inputValue(val bool) error {
-	// Make sure we are in the first epoch round.
+	// Make sure we are in the first epoch and the value is not estimated yet.
 	if b.epoch != 0 || b.estimated != nil {
 		return nil
 	}
 	b.estimated = val
-	b.sentBvals = append(b.sentBvals, val)
-	b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{val}))
-	return b.handleBvalRequest(b.ID, val)
+	return b.sendBval(val)
 }
 
-// handleMessage will process the given rpc message. The caller is resposible to
-// make sure only RPC messages are passed that are elligible for the BBA protocol.
+// handleMessage will process the given rpc message. The caller is responsible to
+// make sure only RPC messages are passed that are eligible for the BBA protocol.
 func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
+	if _, ok := msg.Message.(*DoneRequest); ok {
+		// We handle done messages from all the epochs.
+		return b.handleDoneRequest(senderID, uint32(msg.Epoch))
+	}
 	if b.done {
 		return nil
 	}
@@ -217,9 +279,9 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 		)
 		return nil
 	}
-	// Messages from later epochs will be qued and processed later.
+	// Messages from later epochs will be queued and processed later.
 	if msg.Epoch > int(b.epoch) {
-		b.delayedMessages = append(b.delayedMessages, delayedMessage{senderID, msg})
+		b.delayedMessages = append(b.delayedMessages, &delayedMessage{senderID, msg})
 		return nil
 	}
 
@@ -228,6 +290,8 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 		return b.handleBvalRequest(senderID, t.Value)
 	case *AuxRequest:
 		return b.handleAuxRequest(senderID, t.Value)
+	case *CCRequest:
+		return b.handleCCRequest(t.Payload)
 	default:
 		return fmt.Errorf("unknown BBA message received: %v", t)
 	}
@@ -236,64 +300,110 @@ func (b *BBA) handleMessage(senderID uint64, msg *AgreementMessage) error {
 // handleBvalRequest processes the received binary value and fills up the
 // message que if there are any messages that need to be broadcasted.
 func (b *BBA) handleBvalRequest(senderID uint64, val bool) error {
-	b.lock.Lock()
-	b.recvBval[senderID] = val
-	b.lock.Unlock()
-	lenBval := b.countBvals(val)
+	if b.commonCoinAsked {
+		return nil
+	}
+	b.addRecvBval(senderID, val)
+	lenBval := b.countRecvBvals(val)
 
 	// When receiving n bval(b) messages from 2f+1 nodes: inputs := inputs u {b}
-	if lenBval == 2*b.F+1 {
+	// The set binValues can increase over time (more that a single element).
+	if lenBval > 2*b.F {
 		wasEmptyBinValues := len(b.binValues) == 0
-		b.binValues = append(b.binValues, val)
+		b.addBinValue(val)
 		// If inputs > 0 broadcast output(b) and handle the output ourselfs.
 		// Wait until binValues > 0, then broadcast AUX(b). The AUX(b) broadcast
-		// may only occure once per epoch.
+		// may only occur once per epoch.
 		if wasEmptyBinValues {
 			b.addMessage(NewAgreementMessage(int(b.epoch), &AuxRequest{val}))
-			b.handleAuxRequest(b.ID, val)
+			if err := b.handleAuxRequest(b.ID, val); err != nil {
+				return err
+			}
 		}
-		return nil
 	}
 	// When receiving input(b) messages from f + 1 nodes, if inputs(b) is not
 	// been sent yet broadcast input(b) and handle the input ourselfs.
-	if lenBval == b.F+1 && !b.hasSentBval(val) {
-		b.sentBvals = append(b.sentBvals, val)
-		b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{val}))
-		return b.handleBvalRequest(b.ID, val)
+	if lenBval > b.F && !b.hasSentBval(val) {
+		return b.sendBval(val)
 	}
-	return nil
+
+	// It is possible that we have the needed aux messages already,
+	// therefore we need to try to make a decision.
+	return b.tryOutputAgreement()
 }
 
 func (b *BBA) handleAuxRequest(senderID uint64, val bool) error {
-	b.lock.Lock()
+	if b.commonCoinAsked {
+		return nil
+	}
+	if _, ok := b.recvAux[senderID]; ok {
+		// Only a single aux can be received from a peer.
+		return fmt.Errorf("aux already received, recvNode=%v, epoch=%v, aux=%+v, new %v->%v", b.ID, b.epoch, b.recvAux, senderID, val)
+	}
 	b.recvAux[senderID] = val
-	b.lock.Unlock()
-	b.tryOutputAgreement()
+	return b.tryOutputAgreement()
+}
+
+func (b *BBA) handleCCRequest(payload interface{}) error {
+	coin, outPayloads, err := b.commonCoin.HandleRequest(b.epoch, payload)
+	if err != nil {
+		return err
+	}
+	if err := b.sendCC(outPayloads); err != nil {
+		return err
+	}
+	if b.commonCoinValue == nil {
+		b.commonCoinValue = coin
+	}
+	return b.tryOutputAgreement()
+}
+
+func (b *BBA) handleDoneRequest(senderID uint64, doneInEpoch uint32) error {
+	b.recvDone[senderID] = doneInEpoch
+	if b.canMarkDoneNow() {
+		b.done = true
+	}
 	return nil
 }
 
 // tryOutputAgreement waits until at least (N - f) output messages received,
 // once the (N - f) messages are received, make a common coin and uses it to
 // compute the next decision estimate and output the optional decision value.
-func (b *BBA) tryOutputAgreement() {
+func (b *BBA) tryOutputAgreement() error {
 	if len(b.binValues) == 0 {
-		return
+		return nil
 	}
 	// Wait longer till eventually receive (N - F) aux messages.
-	lenOutputs, values := b.countOutputs()
+	lenOutputs, values := b.countGoodAux()
 	if lenOutputs < b.N-b.F {
-		return
+		return nil
 	}
 
-	// TODO: implement a real common coin algorithm.
-	coin := b.epoch%2 == 0
+	if !b.commonCoinAsked {
+		maybeCoin, ccPayloads, err := b.commonCoin.StartCoinFlip(b.epoch)
+		if err != nil {
+			return err
+		}
+		if err := b.sendCC(ccPayloads); err != nil {
+			return err
+		}
+		b.commonCoinAsked = true
+		if b.commonCoinValue == nil {
+			b.commonCoinValue = maybeCoin
+		}
+	}
+	if b.commonCoinValue == nil {
+		// Still waiting for the common coin.
+		return nil
+	}
+	coin := *b.commonCoinValue
 
 	// Continue the BBA until both:
 	// - a value b is output in some epoch r
 	// - the value (coin r) = b for some round r' > r
-	if b.done || b.decision != nil && b.decision.(bool) == coin {
+	if b.done || (b.decision != nil && b.decision.(bool) == coin) {
 		b.done = true
-		return
+		return nil
 	}
 
 	log.Debugf(
@@ -304,30 +414,55 @@ func (b *BBA) tryOutputAgreement() {
 	// Start the next epoch.
 	b.advanceEpoch()
 
-	if len(values) != 1 {
-		b.estimated = coin
-	} else {
+	if len(values) == 1 {
 		b.estimated = values[0]
-		// Output may be set only once.
-		if b.decision == nil && values[0] == coin {
+		if b.decision == nil && values[0] == coin { // Output may be set only once.
 			b.output = values[0]
 			b.decision = values[0]
 			log.Debugf("id (%d) outputed a decision (%v) after (%d) msgs", b.ID, values[0], b.msgCount)
 			b.msgCount = 0
+			if err := b.sendDone(); err != nil {
+				return err
+			}
 		}
+	} else {
+		b.estimated = coin
 	}
-	estimated := b.estimated.(bool)
-	b.sentBvals = append(b.sentBvals, estimated)
-	b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{estimated}))
+	if err := b.sendBval(b.estimated.(bool)); err != nil {
+		return err
+	}
 
-	// handle the delayed messages.
-	for _, que := range b.delayedMessages {
-		if err := b.handleMessage(que.sid, que.msg); err != nil {
-			// TODO: Handle this error properly.
-			log.Warn(err)
+	// Handle the delayed messages. They can be re-added to the delayed list,
+	// if their epoch is still in the future (in the handleMessage function).
+	deliveryCandidates := b.delayedMessages
+	b.delayedMessages = []*delayedMessage{}
+	for _, delayed := range deliveryCandidates {
+		if err := b.handleMessage(delayed.sid, delayed.msg); err != nil {
+			return err
 		}
 	}
-	b.delayedMessages = []delayedMessage{}
+	return nil
+}
+
+func (b *BBA) sendBval(val bool) error {
+	b.sentBvals = append(b.sentBvals, val)
+	b.addMessage(NewAgreementMessage(int(b.epoch), &BvalRequest{val}))
+	return b.handleBvalRequest(b.ID, val)
+}
+
+func (b *BBA) sendCC(outPayloads []interface{}) error {
+	for _, outPayload := range outPayloads {
+		b.addMessage(NewAgreementMessage(int(b.epoch), &CCRequest{Payload: outPayload}))
+	}
+	return nil
+}
+
+func (b *BBA) sendDone() error {
+	if _, ok := b.recvDone[b.ID]; ok {
+		return nil
+	}
+	b.addMessage(NewAgreementMessage(int(b.epoch), &DoneRequest{}))
+	return b.handleDoneRequest(b.ID, b.epoch)
 }
 
 // advanceEpoch will reset all the values that are bound to an epoch and increments
@@ -336,37 +471,59 @@ func (b *BBA) advanceEpoch() {
 	b.binValues = []bool{}
 	b.sentBvals = []bool{}
 	b.recvAux = make(map[uint64]bool)
-	b.recvBval = make(map[uint64]bool)
+	b.recvBvalT = make(map[uint64]bool)
+	b.recvBvalF = make(map[uint64]bool)
+	b.commonCoinAsked = false
+	b.commonCoinValue = nil
 	b.epoch++
 }
 
-// countOutputs returns the number of received (aux) messages, the corresponding
+// countGoodAux returns the number of received (aux) messages, the corresponding
 // values that where also in our inputs.
-func (b *BBA) countOutputs() (int, []bool) {
-	m := map[bool]int{}
-	for i, val := range b.recvAux {
-		m[val] = int(i)
-	}
-	vals := []bool{}
-	for _, val := range b.binValues {
-		if _, ok := m[val]; ok {
-			vals = append(vals, val)
+func (b *BBA) countGoodAux() (int, []bool) {
+	// Collect aux messages, that were received with values also present in binValues.
+	goodAux := map[uint64]bool{}
+	for i := range b.recvAux {
+		for _, binVal := range b.binValues {
+			if b.recvAux[i] == binVal {
+				goodAux[i] = binVal
+			}
 		}
 	}
-	return len(b.recvAux), vals
+	// Take only the values present in the goodAux
+	values := []bool{}
+	for _, auxVal := range goodAux {
+		found := false
+		for _, val := range values {
+			if auxVal == val {
+				found = true
+				break
+			}
+		}
+		if !found {
+			values = append(values, auxVal)
+		}
+	}
+	return len(goodAux), values
 }
 
-// countBvals counts all the received Bval inputs matching b.
-func (b *BBA) countBvals(ok bool) int {
-	b.lock.RLock()
-	defer b.lock.RUnlock()
-	n := 0
-	for _, val := range b.recvBval {
-		if val == ok {
-			n++
-		}
+// addRecvBval marks the specified BVAL_r(val) as received.
+// The same node can send multiple values, we track them separatelly.
+func (b *BBA) addRecvBval(senderID uint64, val bool) {
+	if val {
+		b.recvBvalT[senderID] = val
+	} else {
+		b.recvBvalF[senderID] = val
 	}
-	return n
+}
+
+// countRecvBvals counts all the received Bval inputs matching b.
+func (b *BBA) countRecvBvals(val bool) int {
+	if val {
+		return len(b.recvBvalT)
+	} else {
+		return len(b.recvBvalF)
+	}
 }
 
 // hasSentBval return true if we already sent out the given value.
@@ -377,4 +534,30 @@ func (b *BBA) hasSentBval(val bool) bool {
 		}
 	}
 	return false
+}
+
+func (b *BBA) addBinValue(val bool) {
+	for _, bv := range b.binValues {
+		if bv == val {
+			return
+		}
+	}
+	b.binValues = append(b.binValues, val)
+}
+
+// If others (more than F) have decided in previous epochs, then we are
+// among the others, who decided in a subsequent round, therefore we don't
+// need to wait for more epochs to close the process.
+func (b *BBA) canMarkDoneNow() bool {
+	if _, ok := b.recvDone[b.ID]; !ok {
+		// We have not decided yet, can't close the process.
+		return false
+	}
+	count := 0
+	for _, e := range b.recvDone {
+		if e < b.recvDone[b.ID] {
+			count++
+		}
+	}
+	return count > b.F
 }
